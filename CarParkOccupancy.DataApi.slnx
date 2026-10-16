@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/CarParkOccupancy.DataApi/CarParkOccupancy.DataApi.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/CarParkOccupancy.DataApi.Tests/CarParkOccupancy.DataApi.Tests.csproj" />
+  </Folder>
+</Solution>
