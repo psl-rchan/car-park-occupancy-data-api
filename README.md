@@ -9,6 +9,24 @@ Minimal ASP.NET Core (.NET 10) API that ingests car park occupancy snapshots int
    (or `ConnectionStrings:CentralDb` in configuration/user-secrets)
 3. `dotnet run --project src/CarParkOccupancy.DataApi`
 
+## Docker
+
+The image listens on port **8080** (ASP.NET Core's default in containers). `ConnectionStrings__CentralDb` is not baked in; pass it at run time. Compose runs the API only (no SQL Server).
+
+```bash
+docker build -t carpark-occupancy-api .
+docker run --rm -p 8080:8080 \
+  -e ConnectionStrings__CentralDb="Server=...;Database=...;User Id=...;Password=...;TrustServerCertificate=True" \
+  carpark-occupancy-api
+```
+
+```bash
+export ConnectionStrings__CentralDb="Server=...;Database=...;User Id=...;Password=...;TrustServerCertificate=True"
+docker compose up --build
+```
+
+Health: `GET http://localhost:8080/health` → `200 {"status":"ok"}`. (`dotnet run` still uses the ports in `launchSettings.json`.)
+
 ## Endpoints
 - `GET /health` → `200 {"status":"ok"}`
 - `POST /api/occupancy` — JSON array of rows, all fields required:
