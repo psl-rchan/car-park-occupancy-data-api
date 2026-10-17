@@ -87,6 +87,7 @@ public class ApiTests
         ]}
         """;
 
+    const string TestApiKey = "test-api-key";
     const string Row = """{"CarParkCode":"{0}","SnapshotTime":"2026-01-01T10:00:00+08:00","CarparkNo":1,"CarparkDesig":"A","CountingCategoryNo":1,"CountingCategory":"Total","FreeLimit":5,"OccupancyLimit":95,"CurrentLevel":40,"Capacity":100}""";
 
     static StringContent Json(string body) => new(body, Encoding.UTF8, "application/json");
@@ -105,17 +106,26 @@ public class ApiTests
         Capacity = capacity
     };
 
-    static (HttpClient Client, FakeStore Store, FakeGemini Gemini) Create()
+    static (HttpClient Client, FakeStore Store, FakeGemini Gemini) Create(bool sendKey = true, string? apiKey = TestApiKey)
     {
         var store = new FakeStore();
         var gemini = new FakeGemini();
         var client = new WebApplicationFactory<Program>()
-            .WithWebHostBuilder(b => b.ConfigureServices(s =>
+            .WithWebHostBuilder(b =>
             {
-                s.AddSingleton<IOccupancyStore>(store);
-                s.AddSingleton<IGeminiClient>(gemini);
-            }))
+                b.ConfigureAppConfiguration((_, cfg) =>
+                {
+                    cfg.AddInMemoryCollection(new Dictionary<string, string?> { ["ApiKey"] = apiKey });
+                });
+                b.ConfigureServices(s =>
+                {
+                    s.AddSingleton<IOccupancyStore>(store);
+                    s.AddSingleton<IGeminiClient>(gemini);
+                });
+            })
             .CreateClient();
+        if (sendKey)
+            client.DefaultRequestHeaders.TryAddWithoutValidation("X-Api-Key", apiKey);
         return (client, store, gemini);
     }
 
@@ -127,6 +137,32 @@ public class ApiTests
     {
         var (c, _, _) = Create();
         Assert.Equal(HttpStatusCode.OK, (await c.GetAsync("/health")).StatusCode);
+    }
+
+    [Fact]
+    public async Task Occupancy_MissingOrWrongApiKey_Returns401_HealthStaysOpen()
+    {
+        var (missing, store, gemini) = Create(sendKey: false);
+        Assert.Equal(HttpStatusCode.OK, (await missing.GetAsync("/health")).StatusCode);
+
+        var post = await missing.PostAsync("/api/occupancy", Json($"[{Row.Replace("{0}", "CP1")}]"));
+        Assert.Equal(HttpStatusCode.Unauthorized, post.StatusCode);
+        Assert.Equal("Unauthorized.", (await Body(post)).GetProperty("error").GetString());
+        Assert.Empty(store.Rows);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await missing.GetAsync("/api/occupancy/latest")).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await missing.GetAsync("/api/occupancy/predict?carParkCode=CP1")).StatusCode);
+        Assert.Null(gemini.LastPrompt);
+
+        var (wrong, _, _) = Create(sendKey: false);
+        wrong.DefaultRequestHeaders.TryAddWithoutValidation("X-Api-Key", "wrong-key");
+        Assert.Equal(HttpStatusCode.Unauthorized, (await wrong.GetAsync("/api/occupancy/latest")).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await wrong.PostAsync("/api/occupancy", Json($"[{Row.Replace("{0}", "CP1")}]"))).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await wrong.GetAsync("/api/occupancy/predict?carParkCode=CP1")).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await wrong.GetAsync("/health")).StatusCode);
+
+        var (unset, _, _) = Create(sendKey: true, apiKey: " ");
+        Assert.Equal(HttpStatusCode.Unauthorized, (await unset.GetAsync("/api/occupancy/latest")).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await unset.GetAsync("/health")).StatusCode);
     }
 
     [Fact]
@@ -316,12 +352,14 @@ public class ApiTests
                         cfg.AddInMemoryCollection(new Dictionary<string, string?>
                         {
                             ["GEMINI_API_KEY"] = "",
-                            ["Vertex:ApiKey"] = ""
+                            ["Vertex:ApiKey"] = "",
+                            ["ApiKey"] = TestApiKey
                         });
                     });
                     b.ConfigureServices(s => s.AddSingleton<IOccupancyStore>(store));
                 })
                 .CreateClient();
+            client.DefaultRequestHeaders.TryAddWithoutValidation("X-Api-Key", TestApiKey);
 
             var res = await client.GetAsync("/api/occupancy/predict?carParkCode=CP1");
             Assert.Equal(HttpStatusCode.ServiceUnavailable, res.StatusCode);

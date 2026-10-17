@@ -1,5 +1,7 @@
 using System.Globalization;
 using System.Net.Http.Json;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using Dapper;
@@ -10,6 +12,31 @@ builder.Services.AddSingleton<IOccupancyStore, SqlOccupancyStore>();
 builder.Services.AddSingleton<IGeminiClient>(sp =>
     new GeminiClient(new HttpClient { Timeout = TimeSpan.FromSeconds(30) }, sp.GetRequiredService<IConfiguration>()));
 var app = builder.Build();
+
+// /api/occupancy requires header X-Api-Key (config/env ApiKey). /health stays open.
+app.Use(async (ctx, next) =>
+{
+    if (ctx.Request.Path.StartsWithSegments("/api/occupancy") && !HasValidApiKey(ctx))
+    {
+        ctx.Response.StatusCode = StatusCodes.Status401Unauthorized;
+        await ctx.Response.WriteAsJsonAsync(new { error = "Unauthorized." });
+        return;
+    }
+
+    await next(ctx);
+});
+
+static bool HasValidApiKey(HttpContext ctx)
+{
+    var expected = ctx.RequestServices.GetRequiredService<IConfiguration>()["ApiKey"];
+    if (string.IsNullOrWhiteSpace(expected))
+        return false;
+
+    var provided = ctx.Request.Headers["X-Api-Key"].ToString();
+    var expectedHash = SHA256.HashData(Encoding.UTF8.GetBytes(expected));
+    var providedHash = SHA256.HashData(Encoding.UTF8.GetBytes(provided));
+    return CryptographicOperations.FixedTimeEquals(expectedHash, providedHash);
+}
 
 app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
 
