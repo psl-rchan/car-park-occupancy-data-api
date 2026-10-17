@@ -33,6 +33,9 @@ app.MapPost("/api/occupancy", async (OccupancyRow[]? rows, IOccupancyStore store
     return Results.Ok(new { inserted = rows.Length });
 });
 
+app.MapGet("/api/occupancy/latest", async (IOccupancyStore store) =>
+    Results.Ok(await store.GetLatestAsync()));
+
 app.MapGet("/api/occupancy/predict", async (
     string? carParkCode,
     string? countingCategory,
@@ -112,6 +115,7 @@ public sealed record RecentOccupancy(IReadOnlyList<string> Categories, IReadOnly
 public interface IOccupancyStore
 {
     Task InsertAsync(IReadOnlyCollection<OccupancyRow> rows);
+    Task<IReadOnlyList<OccupancyRow>> GetLatestAsync();
     Task<RecentOccupancy> GetRecentAsync(string carParkCode, string? countingCategory);
 }
 
@@ -244,6 +248,20 @@ public class SqlOccupancyStore(IConfiguration config) : IOccupancyStore
             (@CarParkCode, @SnapshotTime, @CarparkNo, @CarparkDesig, @CountingCategoryNo, @CountingCategory, @FreeLimit, @OccupancyLimit, @CurrentLevel, @Capacity)
         """;
 
+    private const string LatestSql = """
+        SELECT CarParkCode, SnapshotTime, CarparkNo, CarparkDesig, CountingCategoryNo, CountingCategory,
+               FreeLimit, OccupancyLimit, CurrentLevel, Capacity
+        FROM (
+            SELECT *,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY CarParkCode, CountingCategory
+                       ORDER BY SnapshotTime DESC, Id DESC) AS rn
+            FROM dbo.OccupancySnapshot
+        ) latest
+        WHERE rn = 1
+        ORDER BY CarParkCode, CountingCategory
+        """;
+
     public async Task InsertAsync(IReadOnlyCollection<OccupancyRow> rows)
     {
         await using var conn = new SqlConnection(config.GetConnectionString("CentralDb"));
@@ -251,6 +269,13 @@ public class SqlOccupancyStore(IConfiguration config) : IOccupancyStore
         await using var tx = await conn.BeginTransactionAsync();
         await conn.ExecuteAsync(InsertSql, rows, tx);
         await tx.CommitAsync();
+    }
+
+    public async Task<IReadOnlyList<OccupancyRow>> GetLatestAsync()
+    {
+        await using var conn = new SqlConnection(config.GetConnectionString("CentralDb"));
+        await conn.OpenAsync();
+        return (await conn.QueryAsync<OccupancyRow>(LatestSql)).AsList();
     }
 
     public async Task<RecentOccupancy> GetRecentAsync(string carParkCode, string? countingCategory)
