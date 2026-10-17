@@ -23,17 +23,19 @@ with header `x-goog-api-key`. The key is not put in the query string.
 
 ## Docker
 
-The image listens on port **8080** (ASP.NET Core's default in containers). `ConnectionStrings__CentralDb` is not baked in; pass it at run time. Compose runs the API only (no SQL Server).
+The image listens on port **8080** (ASP.NET Core's default in containers). `ConnectionStrings__CentralDb` and `GEMINI_API_KEY` are not baked in; pass them at run time. Compose also forwards `Vertex__ApiKey` and `Vertex__Model` when set. Compose runs the API only (no SQL Server).
 
 ```bash
 docker build -t carpark-occupancy-api .
 docker run --rm -p 8080:8080 \
   -e ConnectionStrings__CentralDb="Server=...;Database=...;User Id=...;Password=...;TrustServerCertificate=True" \
+  -e GEMINI_API_KEY \
   carpark-occupancy-api
 ```
 
 ```bash
 export ConnectionStrings__CentralDb="Server=...;Database=...;User Id=...;Password=...;TrustServerCertificate=True"
+export GEMINI_API_KEY="..."
 docker compose up --build
 ```
 
