@@ -1,0 +1,45 @@
+Car Park Occupancy Data API — Docker on Linux
+=============================================
+
+From the repository root. Requires Docker Engine and the Compose plugin.
+The image listens on port 8080. docker-compose.yml in this directory runs
+the API only; it does not start SQL Server.
+
+Connection string
+-----------------
+Required environment variable: ConnectionStrings__CentralDb
+(configuration key ConnectionStrings:CentralDb).
+
+Never bake the value into the image, the Dockerfile, or a file that COPY
+puts in the build. Export it in the shell and pass it at run time:
+
+  export ConnectionStrings__CentralDb="Server=...;Database=...;User Id=...;Password=...;TrustServerCertificate=True"
+
+The database must already be reachable from the container. Apply
+db/001_OccupancySnapshot.sql once so dbo.OccupancySnapshot exists.
+
+Build and run
+-------------
+  docker build -t carpark-occupancy-api .
+  docker run --rm -p 8080:8080 \
+    -e ConnectionStrings__CentralDb \
+    carpark-occupancy-api
+
+`-e ConnectionStrings__CentralDb` forwards the variable from the shell.
+Published port on the host is 8080.
+
+Compose
+-------
+Export ConnectionStrings__CentralDb first. Compose fills
+${ConnectionStrings__CentralDb} from that environment. If it is unset,
+the container starts with an empty connection string.
+
+  docker compose up --build
+
+Ctrl-C stops it. `docker compose down` removes the container.
+
+Health
+------
+  curl -fsS http://localhost:8080/health
+
+GET /health returns {"status":"ok"}.

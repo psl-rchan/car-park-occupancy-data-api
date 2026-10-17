@@ -5,4 +5,7 @@
   <Folder Name="/tests/">
     <Project Path="tests/CarParkOccupancy.DataApi.Tests/CarParkOccupancy.DataApi.Tests.csproj" />
   </Folder>
+  <Folder Name="/docs/">
+    <File Path="docs/INSTALL-Docker.txt" />
+  </Folder>
 </Solution>
