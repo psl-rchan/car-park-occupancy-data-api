@@ -5,6 +5,7 @@ services:
       - "8080:8080"
     environment:
       ConnectionStrings__CentralDb: ${ConnectionStrings__CentralDb}
+      ApiKey: ${ApiKey}
       GEMINI_API_KEY: ${GEMINI_API_KEY}
       Vertex__ApiKey: ${Vertex__ApiKey}
       Vertex__Model: ${Vertex__Model}

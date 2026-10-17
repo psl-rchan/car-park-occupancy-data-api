@@ -18,21 +18,37 @@ puts in the build. Export it in the shell and pass it at run time:
 The database must already be reachable from the container. Apply
 db/001_OccupancySnapshot.sql once so dbo.OccupancySnapshot exists.
 
+API key
+-------
+Required for /api/occupancy routes. Environment variable: ApiKey
+(configuration key ApiKey). GET /health does not use it.
+
+Never bake the value into the image, the Dockerfile, or a file that COPY
+puts in the build. Export it in the shell and pass it at run time:
+
+  export ApiKey="..."
+
+Clients send that value in the X-Api-Key header. A missing header, a
+wrong key, or a blank ApiKey returns 401 {"error":"Unauthorized."}.
+
 Build and run
 -------------
   docker build -t carpark-occupancy-api .
   docker run --rm -p 8080:8080 \
     -e ConnectionStrings__CentralDb \
+    -e ApiKey \
     carpark-occupancy-api
 
-`-e ConnectionStrings__CentralDb` forwards the variable from the shell.
-Published port on the host is 8080.
+`-e ConnectionStrings__CentralDb` and `-e ApiKey` forward those variables
+from the shell. Published port on the host is 8080.
 
 Compose
 -------
-Export ConnectionStrings__CentralDb first. Compose fills
-${ConnectionStrings__CentralDb} from that environment. If it is unset,
-the container starts with an empty connection string.
+Export ConnectionStrings__CentralDb and ApiKey first. Compose fills
+${ConnectionStrings__CentralDb} and ${ApiKey} from that environment. If
+the connection string is unset, the container starts with an empty
+connection string. If ApiKey is unset, occupancy routes return 401 and
+GET /health still succeeds.
 
   docker compose up --build
 
