@@ -12,6 +12,18 @@ public class ApiTests
         public List<OccupancyRow> Rows = [];
         public Task InsertAsync(IReadOnlyCollection<OccupancyRow> rows) { Rows.AddRange(rows); return Task.CompletedTask; }
 
+        public Task<IReadOnlyList<OccupancyRow>> GetLatestAsync()
+        {
+            IReadOnlyList<OccupancyRow> latest = Rows
+                .Select((row, index) => (row, index))
+                .GroupBy(x => (x.row.CarParkCode, x.row.CountingCategory))
+                .Select(g => g.OrderByDescending(x => x.row.SnapshotTime).ThenByDescending(x => x.index).First().row)
+                .OrderBy(r => r.CarParkCode, StringComparer.Ordinal)
+                .ThenBy(r => r.CountingCategory, StringComparer.Ordinal)
+                .ToList();
+            return Task.FromResult(latest);
+        }
+
         public Task<RecentOccupancy> GetRecentAsync(string carParkCode, string? countingCategory)
         {
             var since = DateTimeOffset.UtcNow.AddHours(-OccupancyForecast.HistoryHours);
@@ -142,6 +154,34 @@ public class ApiTests
         var (c, _, _) = Create();
         var res = await c.PostAsync("/api/occupancy", Json($"[{Row.Replace("{0}", " ")}]"));
         Assert.Equal(HttpStatusCode.BadRequest, res.StatusCode);
+    }
+
+    [Fact]
+    public async Task Latest_ReturnsNewestRowPerCarParkAndCategory()
+    {
+        var (c, store, _) = Create();
+        store.Rows.Add(Point("CP1", "Total", 10, hoursAgo: 3));
+        store.Rows.Add(Point("CP1", "Total", 40, capacity: 82, hoursAgo: 1));
+        store.Rows.Add(Point("CP2", "Total", 3, hoursAgo: 2));
+        store.Rows.Add(Point("CP1", "EV", 7, hoursAgo: 2));
+
+        var res = await c.GetAsync("/api/occupancy/latest");
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+        var json = await Body(res);
+        Assert.Equal(3, json.GetArrayLength());
+
+        Assert.Equal("CP1", json[0].GetProperty("carParkCode").GetString());
+        Assert.Equal("EV", json[0].GetProperty("countingCategory").GetString());
+        Assert.Equal(7, json[0].GetProperty("currentLevel").GetInt32());
+
+        Assert.Equal("CP1", json[1].GetProperty("carParkCode").GetString());
+        Assert.Equal("Total", json[1].GetProperty("countingCategory").GetString());
+        Assert.Equal(40, json[1].GetProperty("currentLevel").GetInt32());
+        Assert.Equal(82, json[1].GetProperty("capacity").GetInt32());
+
+        Assert.Equal("CP2", json[2].GetProperty("carParkCode").GetString());
+        Assert.Equal("Total", json[2].GetProperty("countingCategory").GetString());
+        Assert.Equal(3, json[2].GetProperty("currentLevel").GetInt32());
     }
 
     [Fact]

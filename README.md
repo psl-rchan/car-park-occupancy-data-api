@@ -50,6 +50,11 @@ Health: `GET http://localhost:8080/health` → `200 {"status":"ok"}`. (`dotnet r
   ```
   Returns `200 {"inserted":N}` (batch inserted in one transaction) or `400 {"error":...}` on validation failure
   (empty array, missing field, blank/over-long strings).
+- `GET /api/occupancy/latest` — one latest row per `CarParkCode` + `CountingCategory` (newest `SnapshotTime`, then highest `Id`). `200` JSON array, camelCase, same fields as ingest; `[]` when the table is empty.
+  ```json
+  [{"carParkCode":"CP1","snapshotTime":"2026-01-01T10:00:00+08:00","carparkNo":1,"carparkDesig":"A",
+    "countingCategoryNo":1,"countingCategory":"Total","freeLimit":5,"occupancyLimit":95,"currentLevel":40,"capacity":100}]
+  ```
 - `GET /api/occupancy/predict?carParkCode=CP1&countingCategory=Total`
   - `countingCategory` is optional when the car park has only one category in the history window.
   - History window: snapshots with `SnapshotTime` in the **last 48 hours**, at most **200** most recent rows for that series (sent to the model oldest-first). No new tables.
