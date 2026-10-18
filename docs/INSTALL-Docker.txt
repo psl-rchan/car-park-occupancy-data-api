@@ -16,7 +16,8 @@ puts in the build. Export it in the shell and pass it at run time:
   export ConnectionStrings__CentralDb="Server=...;Database=...;User Id=...;Password=...;TrustServerCertificate=True"
 
 The database must already be reachable from the container. Apply
-db/001_OccupancySnapshot.sql once so dbo.OccupancySnapshot exists.
+db/001_OccupancySnapshot.sql once so dbo.OccupancySnapshot exists, then
+db/002_OccupancySnapshot_Indexes.sql.
 
 API key
 -------
