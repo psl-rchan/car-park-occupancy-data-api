@@ -336,8 +336,10 @@ public class ApiTests
     [Fact]
     public async Task Predict_MissingApiKey_ServiceUnavailable()
     {
+        var previousPrimary = Environment.GetEnvironmentVariable("Gemini__ApiKey");
         var previousGemini = Environment.GetEnvironmentVariable("GEMINI_API_KEY");
         var previousAlias = Environment.GetEnvironmentVariable("Vertex__ApiKey");
+        Environment.SetEnvironmentVariable("Gemini__ApiKey", "present-but-cleared-by-config");
         Environment.SetEnvironmentVariable("GEMINI_API_KEY", "present-but-cleared-by-config");
         Environment.SetEnvironmentVariable("Vertex__ApiKey", "present-but-cleared-by-config");
         try
@@ -351,6 +353,7 @@ public class ApiTests
                     {
                         cfg.AddInMemoryCollection(new Dictionary<string, string?>
                         {
+                            ["Gemini:ApiKey"] = "",
                             ["GEMINI_API_KEY"] = "",
                             ["Vertex:ApiKey"] = "",
                             ["ApiKey"] = TestApiKey
@@ -363,16 +366,18 @@ public class ApiTests
 
             var res = await client.GetAsync("/api/occupancy/predict?carParkCode=CP1");
             Assert.Equal(HttpStatusCode.ServiceUnavailable, res.StatusCode);
+            Assert.Contains("Gemini__ApiKey", await res.Content.ReadAsStringAsync());
         }
         finally
         {
+            Environment.SetEnvironmentVariable("Gemini__ApiKey", previousPrimary);
             Environment.SetEnvironmentVariable("GEMINI_API_KEY", previousGemini);
             Environment.SetEnvironmentVariable("Vertex__ApiKey", previousAlias);
         }
     }
 
     [Fact]
-    public async Task GeminiClient_UsesApiKeyHeader_NotQueryString()
+    public async Task GeminiClient_UsesPublisherApiKeyQuery()
     {
         HttpRequestMessage? captured = null;
         string? requestBody = null;
@@ -385,6 +390,7 @@ public class ApiTests
         });
         var config = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
         {
+            ["Gemini:ApiKey"] = "publisher-key",
             ["GEMINI_API_KEY"] = "studio-key",
             ["Vertex:ApiKey"] = "alias-key"
         }).Build();
@@ -392,13 +398,13 @@ public class ApiTests
         using var http = new HttpClient(handler);
         var reply = await new GeminiClient(http, config).GenerateAsync("history", CancellationToken.None);
 
-        Assert.Equal("gemini-3.8-flash", reply.Model);
+        Assert.Equal("gemini-2.5-flash-lite", reply.Model);
         Assert.Equal("{\"ok\":true}", reply.Text);
-        Assert.Equal("studio-key", captured!.Headers.GetValues("x-goog-api-key").Single());
+        Assert.False(captured!.Headers.Contains("x-goog-api-key"));
         Assert.DoesNotContain("studio-key", captured.RequestUri!.ToString());
         Assert.DoesNotContain("alias-key", captured.RequestUri.ToString());
-        Assert.Equal("https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent", captured.RequestUri.AbsoluteUri);
-        Assert.DoesNotContain("studio-key", requestBody);
+        Assert.Equal("https://aiplatform.googleapis.com/v1/publishers/google/models/gemini-2.5-flash-lite:generateContent?key=publisher-key", captured.RequestUri.AbsoluteUri);
+        Assert.DoesNotContain("publisher-key", requestBody);
         Assert.Contains("\"text\":\"history\"", requestBody);
         Assert.Contains("application/json", requestBody);
     }
@@ -422,15 +428,19 @@ public class ApiTests
         using var http = new HttpClient(handler);
         var reply = await new GeminiClient(http, config).GenerateAsync("history", CancellationToken.None);
         Assert.Equal("gemini-3.8-flash-lite", reply.Model);
-        Assert.Contains("/models/gemini-3.8-flash-lite:generateContent", captured!.RequestUri!.AbsoluteUri);
-        Assert.Equal("alias-key", captured.Headers.GetValues("x-goog-api-key").Single());
+        Assert.False(captured!.Headers.Contains("x-goog-api-key"));
+        Assert.Equal("https://aiplatform.googleapis.com/v1/publishers/google/models/gemini-3.8-flash-lite:generateContent?key=alias-key", captured.RequestUri!.AbsoluteUri);
     }
 
     [Fact]
     public async Task GeminiClient_HttpError_AndMissingKey()
     {
-        var handler = new StubHandler((_, _) =>
-            Task.FromResult(new HttpResponseMessage(HttpStatusCode.TooManyRequests) { Content = new StringContent("nope") }));
+        HttpRequestMessage? captured = null;
+        var handler = new StubHandler((req, _) =>
+        {
+            captured = req;
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.TooManyRequests) { Content = new StringContent("nope") });
+        });
         var config = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
         {
             ["GEMINI_API_KEY"] = "k"
@@ -441,9 +451,11 @@ public class ApiTests
         Assert.Equal((int)HttpStatusCode.BadGateway, failed.StatusCode);
         Assert.Contains("429", failed.Message);
         Assert.DoesNotContain("nope", failed.Message);
+        Assert.Equal("https://aiplatform.googleapis.com/v1/publishers/google/models/gemini-2.5-flash-lite:generateContent?key=k", captured!.RequestUri!.AbsoluteUri);
 
         var missing = await Assert.ThrowsAsync<GeminiException>(() =>
             new GeminiClient(http, new ConfigurationBuilder().Build()).GenerateAsync("p", CancellationToken.None));
         Assert.Equal((int)HttpStatusCode.ServiceUnavailable, missing.StatusCode);
+        Assert.Contains("Gemini__ApiKey", missing.Message);
     }
 }

@@ -6,6 +6,7 @@ services:
     environment:
       ConnectionStrings__CentralDb: ${ConnectionStrings__CentralDb}
       ApiKey: ${ApiKey}
+      Gemini__ApiKey: ${Gemini__ApiKey}
       GEMINI_API_KEY: ${GEMINI_API_KEY}
       Vertex__ApiKey: ${Vertex__ApiKey}
       Vertex__Model: ${Vertex__Model}

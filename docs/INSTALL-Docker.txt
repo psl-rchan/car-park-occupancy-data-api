@@ -31,24 +31,51 @@ puts in the build. Export it in the shell and pass it at run time:
 Clients send that value in the X-Api-Key header. A missing header, a
 wrong key, or a blank ApiKey returns 401 {"error":"Unauthorized."}.
 
+Forecast API key
+----------------
+Required for GET /api/occupancy/predict. Primary environment variable:
+Gemini__ApiKey (configuration key Gemini:ApiKey).
+
+When Gemini__ApiKey is unset, these existing names still work, in order:
+GEMINI_API_KEY, then Vertex__ApiKey. Optional model override:
+Vertex__Model. Default model is gemini-2.5-flash-lite.
+
+Never bake the key into the image, the Dockerfile, or a file that COPY
+puts in the build. Export it in the shell and pass it at run time:
+
+  export Gemini__ApiKey="..."
+
+The predict call is:
+
+  POST https://aiplatform.googleapis.com/v1/publishers/google/models/{model}:generateContent?key={api_key}
+
+No project id, location, or service account. The key is the query
+parameter, not an x-goog-api-key header.
+
 Build and run
 -------------
   docker build -t carpark-occupancy-api .
   docker run --rm -p 8080:8080 \
     -e ConnectionStrings__CentralDb \
     -e ApiKey \
+    -e Gemini__ApiKey \
     carpark-occupancy-api
 
-`-e ConnectionStrings__CentralDb` and `-e ApiKey` forward those variables
-from the shell. Published port on the host is 8080.
+`-e ConnectionStrings__CentralDb`, `-e ApiKey`, and `-e Gemini__ApiKey`
+forward those variables from the shell. Published port on the host is
+8080. To keep an older host working, also pass `-e GEMINI_API_KEY` or
+`-e Vertex__ApiKey` when that is the name already exported.
 
 Compose
 -------
-Export ConnectionStrings__CentralDb and ApiKey first. Compose fills
-${ConnectionStrings__CentralDb} and ${ApiKey} from that environment. If
-the connection string is unset, the container starts with an empty
+Export ConnectionStrings__CentralDb, ApiKey, and Gemini__ApiKey first.
+Compose fills ${ConnectionStrings__CentralDb}, ${ApiKey}, and
+${Gemini__ApiKey} from that environment. It also forwards
+GEMINI_API_KEY, Vertex__ApiKey, and Vertex__Model when those are set.
+If the connection string is unset, the container starts with an empty
 connection string. If ApiKey is unset, occupancy routes return 401 and
-GET /health still succeeds.
+GET /health still succeeds. If every Gemini key name is unset, predict
+returns 503.
 
   docker compose up --build
 
