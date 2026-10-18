@@ -165,7 +165,7 @@ public static class OccupancyForecast
     public const int HistoryHours = 48;
     public const int MaxPoints = 200;
     public const int HorizonHours = 6;
-    public const string DefaultModel = "gemini-3.8-flash";
+    public const string DefaultModel = "gemini-2.5-flash-lite";
 
     public static string BuildPrompt(string carParkCode, string category, IReadOnlyList<OccupancyPoint> points)
     {
@@ -344,8 +344,8 @@ public class SqlOccupancyStore(IConfiguration config) : IOccupancyStore
 }
 
 /// <summary>
-/// Gemini API (AI Studio) generateContent call. Auth is an API key header, not ADC.
-/// POST https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent
+/// Vertex AI publisher generateContent. Auth is an API key query parameter, not ADC.
+/// POST https://aiplatform.googleapis.com/v1/publishers/google/models/{model}:generateContent?key={api_key}
 /// </summary>
 public sealed class GeminiClient(HttpClient http, IConfiguration config) : IGeminiClient
 {
@@ -353,16 +353,18 @@ public sealed class GeminiClient(HttpClient http, IConfiguration config) : IGemi
 
     public async Task<GeminiReply> GenerateAsync(string prompt, CancellationToken cancellationToken)
     {
-        var key = FirstNonEmpty(config["GEMINI_API_KEY"], config["Vertex:ApiKey"]);
+        // Gemini__ApiKey is primary. GEMINI_API_KEY and Vertex__ApiKey remain so an existing deploy keeps working.
+        var key = FirstNonEmpty(config["Gemini:ApiKey"], config["GEMINI_API_KEY"], config["Vertex:ApiKey"]);
         if (key is null)
-            throw new GeminiException(StatusCodes.Status503ServiceUnavailable, "Gemini API key is not configured. Set GEMINI_API_KEY or Vertex__ApiKey.");
+            throw new GeminiException(StatusCodes.Status503ServiceUnavailable, "Gemini API key is not configured. Set Gemini__ApiKey (or GEMINI_API_KEY or Vertex__ApiKey).");
 
         var model = FirstNonEmpty(config["Vertex:Model"]) ?? OccupancyForecast.DefaultModel;
         if (!ModelId.IsMatch(model))
-            throw new GeminiException(StatusCodes.Status503ServiceUnavailable, "Vertex__Model must be a Gemini model id such as gemini-3.8-flash.");
+            throw new GeminiException(StatusCodes.Status503ServiceUnavailable, "Vertex__Model must be a Gemini model id such as gemini-2.5-flash-lite.");
 
-        using var req = new HttpRequestMessage(HttpMethod.Post, $"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent");
-        req.Headers.TryAddWithoutValidation("x-goog-api-key", key);
+        using var req = new HttpRequestMessage(
+            HttpMethod.Post,
+            $"https://aiplatform.googleapis.com/v1/publishers/google/models/{model}:generateContent?key={Uri.EscapeDataString(key)}");
         req.Content = JsonContent.Create(new
         {
             contents = new[] { new { role = "user", parts = new[] { new { text = prompt } } } },
