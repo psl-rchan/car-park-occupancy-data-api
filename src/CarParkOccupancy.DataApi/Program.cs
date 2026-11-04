@@ -63,6 +63,53 @@ app.MapPost("/api/occupancy", async (OccupancyRow[]? rows, IOccupancyStore store
 app.MapGet("/api/occupancy/latest", async (IOccupancyStore store) =>
     Results.Ok(await store.GetLatestAsync()));
 
+app.MapGet("/api/occupancy/history", async (
+    string? carParkCode,
+    string? countingCategory,
+    int? carparkNo,
+    double? hoursBack,
+    DateTimeOffset? from,
+    DateTimeOffset? to,
+    IOccupancyStore store) =>
+{
+    if (string.IsNullOrWhiteSpace(carParkCode) || carParkCode.Length > 50)
+        return Results.BadRequest(new { error = "carParkCode is required (max 50 chars)." });
+
+    var category = string.IsNullOrWhiteSpace(countingCategory) ? "Total" : countingCategory.Trim();
+    if (category != "Total")
+        return Results.BadRequest(new { error = "countingCategory must be Total." });
+
+    if (hoursBack is not null && (from is not null || to is not null))
+        return Results.BadRequest(new { error = "Pass hoursBack or from and to, not both." });
+
+    DateTimeOffset fromTime, toTime;
+    if (hoursBack is { } hours)
+    {
+        if (!(hours > 0))
+            return Results.BadRequest(new { error = "hoursBack must be greater than 0." });
+        toTime = DateTimeOffset.UtcNow;
+        try
+        {
+            fromTime = toTime.AddHours(-hours);
+        }
+        catch (OverflowException)
+        {
+            return Results.BadRequest(new { error = "hoursBack is out of range." });
+        }
+    }
+    else if (from is { } fromValue && to is { } toValue)
+    {
+        if (fromValue > toValue)
+            return Results.BadRequest(new { error = "from must be before or equal to to." });
+        fromTime = fromValue;
+        toTime = toValue;
+    }
+    else
+        return Results.BadRequest(new { error = "hoursBack or both from and to are required." });
+
+    return Results.Ok(await store.GetHistoryAsync(carParkCode, category, carparkNo ?? 0, fromTime, toTime));
+});
+
 app.MapGet("/api/occupancy/predict", async (
     string? carParkCode,
     string? countingCategory,
@@ -143,6 +190,8 @@ public interface IOccupancyStore
 {
     Task InsertAsync(IReadOnlyCollection<OccupancyRow> rows);
     Task<IReadOnlyList<OccupancyRow>> GetLatestAsync();
+    Task<IReadOnlyList<OccupancyRow>> GetHistoryAsync(
+        string carParkCode, string countingCategory, int carparkNo, DateTimeOffset from, DateTimeOffset to);
     Task<RecentOccupancy> GetRecentAsync(string carParkCode, string? countingCategory);
 }
 
@@ -289,6 +338,18 @@ public class SqlOccupancyStore(IConfiguration config) : IOccupancyStore
         ORDER BY CarParkCode, CountingCategory
         """;
 
+    private const string HistorySql = """
+        SELECT CarParkCode, SnapshotTime, CarparkNo, CarparkDesig, CountingCategoryNo, CountingCategory,
+               FreeLimit, OccupancyLimit, CurrentLevel, Capacity
+        FROM dbo.OccupancySnapshot
+        WHERE CarParkCode = @CarParkCode
+          AND CountingCategory = @CountingCategory
+          AND CarparkNo = @CarparkNo
+          AND SnapshotTime >= @FromTime
+          AND SnapshotTime <= @ToTime
+        ORDER BY SnapshotTime ASC
+        """;
+
     public async Task InsertAsync(IReadOnlyCollection<OccupancyRow> rows)
     {
         await using var conn = new SqlConnection(config.GetConnectionString("CentralDb"));
@@ -303,6 +364,21 @@ public class SqlOccupancyStore(IConfiguration config) : IOccupancyStore
         await using var conn = new SqlConnection(config.GetConnectionString("CentralDb"));
         await conn.OpenAsync();
         return (await conn.QueryAsync<OccupancyRow>(LatestSql)).AsList();
+    }
+
+    public async Task<IReadOnlyList<OccupancyRow>> GetHistoryAsync(
+        string carParkCode, string countingCategory, int carparkNo, DateTimeOffset from, DateTimeOffset to)
+    {
+        await using var conn = new SqlConnection(config.GetConnectionString("CentralDb"));
+        await conn.OpenAsync();
+        return (await conn.QueryAsync<OccupancyRow>(HistorySql, new
+        {
+            CarParkCode = carParkCode,
+            CountingCategory = countingCategory,
+            CarparkNo = carparkNo,
+            FromTime = from,
+            ToTime = to
+        })).AsList();
     }
 
     public async Task<RecentOccupancy> GetRecentAsync(string carParkCode, string? countingCategory)
