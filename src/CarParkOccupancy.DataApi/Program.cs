@@ -61,7 +61,10 @@ app.MapPost("/api/occupancy", async (OccupancyRow[]? rows, IOccupancyStore store
 });
 
 app.MapGet("/api/occupancy/latest", async (IOccupancyStore store) =>
-    Results.Ok(await store.GetLatestAsync()));
+{
+    var rows = await store.GetLatestAsync();
+    return Results.Ok(rows.Where(r => r.CountingCategory == "Total").ToArray());
+});
 
 app.MapGet("/api/occupancy/predict", async (
     string? carParkCode,
@@ -73,13 +76,13 @@ app.MapGet("/api/occupancy/predict", async (
     if (string.IsNullOrWhiteSpace(carParkCode) || carParkCode.Length > 50)
         return Results.BadRequest(new { error = "carParkCode is required (max 50 chars)." });
 
-    var categoryFilter = string.IsNullOrWhiteSpace(countingCategory) ? null : countingCategory.Trim();
-    if (categoryFilter is { Length: > 100 })
+    var categoryFilter = string.IsNullOrWhiteSpace(countingCategory) ? "Total" : countingCategory.Trim();
+    if (categoryFilter.Length > 100)
         return Results.BadRequest(new { error = "countingCategory is too long (max 100 chars)." });
+    if (categoryFilter != "Total")
+        return Results.BadRequest(new { error = "countingCategory must be Total." });
 
     var recent = await store.GetRecentAsync(carParkCode, categoryFilter);
-    if (categoryFilter is null && recent.Categories.Count > 1)
-        return Results.BadRequest(new { error = $"countingCategory is required when more than one series exists in the last {OccupancyForecast.HistoryHours} hours." });
     if (recent.Points.Count == 0)
         return Results.NotFound(new { error = $"No occupancy history in the last {OccupancyForecast.HistoryHours} hours." });
 

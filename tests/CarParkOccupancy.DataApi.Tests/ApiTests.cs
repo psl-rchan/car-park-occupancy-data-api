@@ -193,31 +193,28 @@ public class ApiTests
     }
 
     [Fact]
-    public async Task Latest_ReturnsNewestRowPerCarParkAndCategory()
+    public async Task Latest_ReturnsNewestTotalRowPerCarPark()
     {
         var (c, store, _) = Create();
         store.Rows.Add(Point("CP1", "Total", 10, hoursAgo: 3));
         store.Rows.Add(Point("CP1", "Total", 40, capacity: 82, hoursAgo: 1));
         store.Rows.Add(Point("CP2", "Total", 3, hoursAgo: 2));
         store.Rows.Add(Point("CP1", "EV", 7, hoursAgo: 2));
+        store.Rows.Add(Point("CP3", "total", 9, hoursAgo: 1));
 
         var res = await c.GetAsync("/api/occupancy/latest");
         Assert.Equal(HttpStatusCode.OK, res.StatusCode);
         var json = await Body(res);
-        Assert.Equal(3, json.GetArrayLength());
+        Assert.Equal(2, json.GetArrayLength());
 
         Assert.Equal("CP1", json[0].GetProperty("carParkCode").GetString());
-        Assert.Equal("EV", json[0].GetProperty("countingCategory").GetString());
-        Assert.Equal(7, json[0].GetProperty("currentLevel").GetInt32());
+        Assert.Equal("Total", json[0].GetProperty("countingCategory").GetString());
+        Assert.Equal(40, json[0].GetProperty("currentLevel").GetInt32());
+        Assert.Equal(82, json[0].GetProperty("capacity").GetInt32());
 
-        Assert.Equal("CP1", json[1].GetProperty("carParkCode").GetString());
+        Assert.Equal("CP2", json[1].GetProperty("carParkCode").GetString());
         Assert.Equal("Total", json[1].GetProperty("countingCategory").GetString());
-        Assert.Equal(40, json[1].GetProperty("currentLevel").GetInt32());
-        Assert.Equal(82, json[1].GetProperty("capacity").GetInt32());
-
-        Assert.Equal("CP2", json[2].GetProperty("carParkCode").GetString());
-        Assert.Equal("Total", json[2].GetProperty("countingCategory").GetString());
-        Assert.Equal(3, json[2].GetProperty("currentLevel").GetInt32());
+        Assert.Equal(3, json[1].GetProperty("currentLevel").GetInt32());
     }
 
     [Fact]
@@ -283,31 +280,45 @@ public class ApiTests
     }
 
     [Fact]
-    public async Task Predict_TwoCategories_RequiresCategory()
+    public async Task Predict_DefaultsToTotal_AndRejectsOtherCategories()
     {
         var (c, store, gemini) = Create();
         store.Rows.Add(Point("CP1", "Total", 10));
         store.Rows.Add(Point("CP1", "EV", 90));
 
-        var missing = await c.GetAsync("/api/occupancy/predict?carParkCode=CP1");
-        Assert.Equal(HttpStatusCode.BadRequest, missing.StatusCode);
+        var ev = await c.GetAsync("/api/occupancy/predict?carParkCode=CP1&countingCategory=EV");
+        Assert.Equal(HttpStatusCode.BadRequest, ev.StatusCode);
+        Assert.Equal("countingCategory must be Total.", (await Body(ev)).GetProperty("error").GetString());
         Assert.Null(gemini.LastPrompt);
 
-        var res = await c.GetAsync("/api/occupancy/predict?carParkCode=CP1&countingCategory=EV");
+        var otherCase = await c.GetAsync("/api/occupancy/predict?carParkCode=CP1&countingCategory=total");
+        Assert.Equal(HttpStatusCode.BadRequest, otherCase.StatusCode);
+        Assert.Null(gemini.LastPrompt);
+
+        var res = await c.GetAsync("/api/occupancy/predict?carParkCode=CP1");
         Assert.Equal(HttpStatusCode.OK, res.StatusCode);
         var json = await Body(res);
-        Assert.Equal("EV", json.GetProperty("countingCategory").GetString());
-        Assert.Contains("\"level\":90", gemini.LastPrompt);
-        Assert.DoesNotContain("\"level\":10", gemini.LastPrompt);
+        Assert.Equal("Total", json.GetProperty("countingCategory").GetString());
+        Assert.Contains("\"level\":10", gemini.LastPrompt);
+        Assert.DoesNotContain("\"level\":90", gemini.LastPrompt);
+
+        var explicitTotal = await c.GetAsync("/api/occupancy/predict?carParkCode=CP1&countingCategory=Total");
+        Assert.Equal(HttpStatusCode.OK, explicitTotal.StatusCode);
+        Assert.Equal("Total", (await Body(explicitTotal)).GetProperty("countingCategory").GetString());
     }
 
     [Fact]
-    public async Task Predict_UnknownCategory_NotFound()
+    public async Task Predict_NoTotalHistory_NotFound()
     {
-        var (c, store, _) = Create();
-        store.Rows.Add(Point("CP1", "Total", 10));
-        var res = await c.GetAsync("/api/occupancy/predict?carParkCode=CP1&countingCategory=EV");
-        Assert.Equal(HttpStatusCode.NotFound, res.StatusCode);
+        var (c, store, gemini) = Create();
+        store.Rows.Add(Point("CP1", "EV", 10));
+
+        var omitted = await c.GetAsync("/api/occupancy/predict?carParkCode=CP1");
+        Assert.Equal(HttpStatusCode.NotFound, omitted.StatusCode);
+        Assert.Null(gemini.LastPrompt);
+
+        var explicitTotal = await c.GetAsync("/api/occupancy/predict?carParkCode=CP1&countingCategory=Total");
+        Assert.Equal(HttpStatusCode.NotFound, explicitTotal.StatusCode);
     }
 
     [Theory]
