@@ -25,6 +25,20 @@ public class ApiTests
             return Task.FromResult(latest);
         }
 
+        public Task<IReadOnlyList<OccupancyRow>> GetHistoryAsync(
+            string carParkCode, string countingCategory, int carparkNo, DateTimeOffset from, DateTimeOffset to)
+        {
+            IReadOnlyList<OccupancyRow> rows = Rows
+                .Where(r => r.CarParkCode == carParkCode
+                    && r.CountingCategory == countingCategory
+                    && r.CarparkNo == carparkNo
+                    && r.SnapshotTime >= from
+                    && r.SnapshotTime <= to)
+                .OrderBy(r => r.SnapshotTime)
+                .ToList();
+            return Task.FromResult(rows);
+        }
+
         public Task<RecentOccupancy> GetRecentAsync(string carParkCode, string? countingCategory)
         {
             var since = DateTimeOffset.UtcNow.AddHours(-OccupancyForecast.HistoryHours);
@@ -151,12 +165,14 @@ public class ApiTests
         Assert.Equal("Unauthorized.", (await Body(post)).GetProperty("error").GetString());
         Assert.Empty(store.Rows);
         Assert.Equal(HttpStatusCode.Unauthorized, (await missing.GetAsync("/api/occupancy/latest")).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await missing.GetAsync("/api/occupancy/history?carParkCode=CP1&hoursBack=1")).StatusCode);
         Assert.Equal(HttpStatusCode.Unauthorized, (await missing.GetAsync("/api/occupancy/predict?carParkCode=CP1")).StatusCode);
         Assert.Null(gemini.LastPrompt);
 
         var (wrong, _, _) = Create(sendKey: false);
         wrong.DefaultRequestHeaders.TryAddWithoutValidation("X-Api-Key", "wrong-key");
         Assert.Equal(HttpStatusCode.Unauthorized, (await wrong.GetAsync("/api/occupancy/latest")).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await wrong.GetAsync("/api/occupancy/history?carParkCode=CP1&hoursBack=1")).StatusCode);
         Assert.Equal(HttpStatusCode.Unauthorized, (await wrong.PostAsync("/api/occupancy", Json($"[{Row.Replace("{0}", "CP1")}]"))).StatusCode);
         Assert.Equal(HttpStatusCode.Unauthorized, (await wrong.GetAsync("/api/occupancy/predict?carParkCode=CP1")).StatusCode);
         Assert.Equal(HttpStatusCode.OK, (await wrong.GetAsync("/health")).StatusCode);
@@ -219,6 +235,86 @@ public class ApiTests
         Assert.Equal("CP2", json[1].GetProperty("carParkCode").GetString());
         Assert.Equal("Total", json[1].GetProperty("countingCategory").GetString());
         Assert.Equal(3, json[1].GetProperty("currentLevel").GetInt32());
+    }
+
+    [Fact]
+    public async Task History_HoursBack_ReturnsTotalRowsInWindowOldestFirst()
+    {
+        var (c, store, _) = Create();
+        var matchOld = Point("CP1", "Total", 10, capacity: 82, hoursAgo: 0.6) with { CarparkNo = 0 };
+        var matchNew = Point("CP1", "Total", 40, capacity: 82, hoursAgo: 0.2) with { CarparkNo = 0 };
+        store.Rows.Add(matchNew);
+        store.Rows.Add(matchOld);
+        store.Rows.Add(Point("CP1", "Total", 99, hoursAgo: 0.2));
+        store.Rows.Add(Point("CP1", "EV", 7, hoursAgo: 0.2) with { CarparkNo = 0 });
+        store.Rows.Add(Point("CP2", "Total", 3, hoursAgo: 0.2) with { CarparkNo = 0 });
+        store.Rows.Add(Point("CP1", "Total", 1, hoursAgo: 3) with { CarparkNo = 0 });
+
+        var res = await c.GetAsync("/api/occupancy/history?carParkCode=CP1&hoursBack=1");
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+        var json = await Body(res);
+        Assert.Equal(2, json.GetArrayLength());
+
+        Assert.Equal("CP1", json[0].GetProperty("carParkCode").GetString());
+        Assert.Equal(10, json[0].GetProperty("currentLevel").GetInt32());
+        Assert.Equal(0, json[0].GetProperty("carparkNo").GetInt32());
+        Assert.Equal("Total", json[0].GetProperty("countingCategory").GetString());
+        Assert.Equal(82, json[0].GetProperty("capacity").GetInt32());
+        Assert.Equal("A", json[0].GetProperty("carparkDesig").GetString());
+        Assert.Equal(1, json[0].GetProperty("countingCategoryNo").GetInt32());
+        Assert.Equal(5, json[0].GetProperty("freeLimit").GetInt32());
+        Assert.Equal(95, json[0].GetProperty("occupancyLimit").GetInt32());
+        Assert.True(json[0].GetProperty("snapshotTime").GetDateTimeOffset() < json[1].GetProperty("snapshotTime").GetDateTimeOffset());
+        Assert.Equal(40, json[1].GetProperty("currentLevel").GetInt32());
+
+        var empty = await c.GetAsync("/api/occupancy/history?carParkCode=NONE&countingCategory=Total&hoursBack=1");
+        Assert.Equal(HttpStatusCode.OK, empty.StatusCode);
+        Assert.Equal(0, (await Body(empty)).GetArrayLength());
+    }
+
+    [Fact]
+    public async Task History_FromTo_IsInclusive()
+    {
+        var (c, store, _) = Create();
+        var from = new DateTimeOffset(2026, 1, 1, 2, 0, 0, TimeSpan.Zero);
+        var to = new DateTimeOffset(2026, 1, 1, 3, 0, 0, TimeSpan.Zero);
+        store.Rows.Add(Point("CP1", "Total", 1) with { CarparkNo = 2, SnapshotTime = from.AddMinutes(-1) });
+        store.Rows.Add(Point("CP1", "Total", 2) with { CarparkNo = 2, SnapshotTime = from });
+        store.Rows.Add(Point("CP1", "Total", 3) with { CarparkNo = 2, SnapshotTime = to });
+        store.Rows.Add(Point("CP1", "Total", 4) with { CarparkNo = 2, SnapshotTime = to.AddMinutes(1) });
+
+        var res = await c.GetAsync("/api/occupancy/history?carParkCode=CP1&carparkNo=2&from=2026-01-01T02:00:00Z&to=2026-01-01T03:00:00Z");
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+        var json = await Body(res);
+        Assert.Equal(2, json.GetArrayLength());
+        Assert.Equal(2, json[0].GetProperty("currentLevel").GetInt32());
+        Assert.Equal(3, json[1].GetProperty("currentLevel").GetInt32());
+    }
+
+    [Fact]
+    public async Task History_NonTotalCategory_BadRequest()
+    {
+        var (c, _, _) = Create();
+        var res = await c.GetAsync("/api/occupancy/history?carParkCode=CP1&countingCategory=EV&hoursBack=1");
+        Assert.Equal(HttpStatusCode.BadRequest, res.StatusCode);
+        Assert.Equal("countingCategory must be Total.", (await Body(res)).GetProperty("error").GetString());
+    }
+
+    [Theory]
+    [InlineData("?hoursBack=1")]
+    [InlineData("?carParkCode=%20&hoursBack=1")]
+    [InlineData("?carParkCode=this-code-is-longer-than-fifty-characters-so-it-fails&hoursBack=1")]
+    [InlineData("?carParkCode=CP1")]
+    [InlineData("?carParkCode=CP1&from=2026-01-01T00:00:00Z")]
+    [InlineData("?carParkCode=CP1&to=2026-01-01T00:00:00Z")]
+    [InlineData("?carParkCode=CP1&hoursBack=0")]
+    [InlineData("?carParkCode=CP1&hoursBack=-1")]
+    [InlineData("?carParkCode=CP1&hoursBack=1&from=2026-01-01T00:00:00Z&to=2026-01-01T01:00:00Z")]
+    [InlineData("?carParkCode=CP1&from=2026-01-02T00:00:00Z&to=2026-01-01T00:00:00Z")]
+    public async Task History_BadInput_BadRequest(string query)
+    {
+        var (c, _, _) = Create();
+        Assert.Equal(HttpStatusCode.BadRequest, (await c.GetAsync("/api/occupancy/history" + query)).StatusCode);
     }
 
     [Fact]
