@@ -15,6 +15,7 @@ public class ApiTests
         public Task<IReadOnlyList<OccupancyRow>> GetLatestAsync()
         {
             IReadOnlyList<OccupancyRow> latest = Rows
+                .Where(r => r.CarparkNo == 0)
                 .Select((row, index) => (row, index))
                 .GroupBy(x => (x.row.CarParkCode, x.row.CountingCategory))
                 .Select(g => g.OrderByDescending(x => x.row.SnapshotTime).ThenByDescending(x => x.index).First().row)
@@ -28,7 +29,7 @@ public class ApiTests
         {
             var since = DateTimeOffset.UtcNow.AddHours(-OccupancyForecast.HistoryHours);
             var window = Rows
-                .Where(r => r.CarParkCode == carParkCode && r.SnapshotTime >= since)
+                .Where(r => r.CarParkCode == carParkCode && r.CarparkNo == 0 && r.SnapshotTime >= since)
                 .Select(r => new OccupancyPoint
                 {
                     SnapshotTime = r.SnapshotTime,
@@ -92,11 +93,11 @@ public class ApiTests
 
     static StringContent Json(string body) => new(body, Encoding.UTF8, "application/json");
 
-    static OccupancyRow Point(string code, string category, int level, int capacity = 100, double hoursAgo = 1) => new()
+    static OccupancyRow Point(string code, string category, int level, int capacity = 100, double hoursAgo = 1, int carparkNo = 0) => new()
     {
         CarParkCode = code,
         SnapshotTime = DateTimeOffset.UtcNow.AddHours(-hoursAgo),
-        CarparkNo = 1,
+        CarparkNo = carparkNo,
         CarparkDesig = "A",
         CountingCategoryNo = 1,
         CountingCategory = category,
@@ -198,9 +199,11 @@ public class ApiTests
         var (c, store, _) = Create();
         store.Rows.Add(Point("CP1", "Total", 10, hoursAgo: 3));
         store.Rows.Add(Point("CP1", "Total", 40, capacity: 82, hoursAgo: 1));
+        store.Rows.Add(Point("CP1", "Total", 99, hoursAgo: 0.1, carparkNo: 1));
         store.Rows.Add(Point("CP2", "Total", 3, hoursAgo: 2));
         store.Rows.Add(Point("CP1", "EV", 7, hoursAgo: 2));
         store.Rows.Add(Point("CP3", "total", 9, hoursAgo: 1));
+        store.Rows.Add(Point("CP4", "Total", 8, carparkNo: 2));
 
         var res = await c.GetAsync("/api/occupancy/latest");
         Assert.Equal(HttpStatusCode.OK, res.StatusCode);
@@ -209,6 +212,7 @@ public class ApiTests
 
         Assert.Equal("CP1", json[0].GetProperty("carParkCode").GetString());
         Assert.Equal("Total", json[0].GetProperty("countingCategory").GetString());
+        Assert.Equal(0, json[0].GetProperty("carparkNo").GetInt32());
         Assert.Equal(40, json[0].GetProperty("currentLevel").GetInt32());
         Assert.Equal(82, json[0].GetProperty("capacity").GetInt32());
 
@@ -223,6 +227,7 @@ public class ApiTests
         var (c, store, gemini) = Create();
         store.Rows.Add(Point("CP1", "Total", 10, hoursAgo: 3));
         store.Rows.Add(Point("CP1", "Total", 40, capacity: 82, hoursAgo: 1));
+        store.Rows.Add(Point("CP1", "Total", 77, hoursAgo: 0.1, carparkNo: 1));
 
         var res = await c.GetAsync("/api/occupancy/predict?carParkCode=CP1");
         Assert.Equal(HttpStatusCode.OK, res.StatusCode);
@@ -242,6 +247,7 @@ public class ApiTests
         var older = gemini.LastPrompt!.IndexOf("\"level\":10", StringComparison.Ordinal);
         var newer = gemini.LastPrompt.IndexOf("\"level\":40", StringComparison.Ordinal);
         Assert.True(older >= 0 && older < newer);
+        Assert.DoesNotContain("\"level\":77", gemini.LastPrompt);
     }
 
     [Fact]
@@ -312,6 +318,7 @@ public class ApiTests
     {
         var (c, store, gemini) = Create();
         store.Rows.Add(Point("CP1", "EV", 10));
+        store.Rows.Add(Point("CP1", "Total", 50, carparkNo: 1));
 
         var omitted = await c.GetAsync("/api/occupancy/predict?carParkCode=CP1");
         Assert.Equal(HttpStatusCode.NotFound, omitted.StatusCode);

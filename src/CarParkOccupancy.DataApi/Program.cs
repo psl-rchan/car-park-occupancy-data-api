@@ -63,7 +63,7 @@ app.MapPost("/api/occupancy", async (OccupancyRow[]? rows, IOccupancyStore store
 app.MapGet("/api/occupancy/latest", async (IOccupancyStore store) =>
 {
     var rows = await store.GetLatestAsync();
-    return Results.Ok(rows.Where(r => r.CountingCategory == "Total").ToArray());
+    return Results.Ok(rows.Where(r => r.CountingCategory == "Total" && r.CarparkNo == 0).ToArray());
 });
 
 app.MapGet("/api/occupancy/predict", async (
@@ -287,6 +287,7 @@ public class SqlOccupancyStore(IConfiguration config) : IOccupancyStore
                        PARTITION BY CarParkCode, CountingCategory
                        ORDER BY SnapshotTime DESC, Id DESC) AS rn
             FROM dbo.OccupancySnapshot
+            WHERE CarparkNo = 0
         ) latest
         WHERE rn = 1
         ORDER BY CarParkCode, CountingCategory
@@ -317,7 +318,7 @@ public class SqlOccupancyStore(IConfiguration config) : IOccupancyStore
         var categories = (await conn.QueryAsync<string>("""
             SELECT DISTINCT CountingCategory
             FROM dbo.OccupancySnapshot
-            WHERE CarParkCode = @CarParkCode AND SnapshotTime >= @Since
+            WHERE CarParkCode = @CarParkCode AND SnapshotTime >= @Since AND CarparkNo = 0
             """, new { CarParkCode = carParkCode, Since = since })).AsList();
 
         if (categories.Count == 0)
@@ -332,6 +333,7 @@ public class SqlOccupancyStore(IConfiguration config) : IOccupancyStore
             WHERE CarParkCode = @CarParkCode
               AND CountingCategory = @CountingCategory
               AND SnapshotTime >= @Since
+              AND CarparkNo = 0
             ORDER BY SnapshotTime DESC
             """, new
         {
