@@ -57,23 +57,23 @@ Occupancy routes require header `X-Api-Key` with the same value as `ApiKey`. A m
     "CountingCategoryNo":1,"CountingCategory":"Total","FreeLimit":5,"OccupancyLimit":95,"CurrentLevel":40,"Capacity":100}]
   ```
   Returns `200 {"inserted":N}` (batch inserted in one transaction) or `400 {"error":...}` on validation failure
-  (empty array, missing field, blank/over-long strings).
-- `GET /api/occupancy/latest` — one latest row per `CarParkCode` + `CountingCategory` (newest `SnapshotTime`, then highest `Id`). `200` JSON array, camelCase, same fields as ingest; `[]` when the table is empty.
+  (empty array, missing field, blank/over-long strings). Any `CountingCategory` is accepted.
+- `GET /api/occupancy/latest` — one latest row per `CarParkCode` where `CountingCategory` is exactly `Total` and `CarparkNo` is `0` (newest `SnapshotTime`, then highest `Id`). Other categories and car park numbers are omitted. `200` JSON array, camelCase, same fields as ingest; `[]` when no matching row exists.
   ```json
-  [{"carParkCode":"CP1","snapshotTime":"2026-01-01T10:00:00+08:00","carparkNo":1,"carparkDesig":"A",
+  [{"carParkCode":"CP1","snapshotTime":"2026-01-01T10:00:00+08:00","carparkNo":0,"carparkDesig":"A",
     "countingCategoryNo":1,"countingCategory":"Total","freeLimit":5,"occupancyLimit":95,"currentLevel":40,"capacity":100}]
   ```
 - `GET /api/occupancy/predict?carParkCode=CP1&countingCategory=Total`
-  - `countingCategory` is optional when the car park has only one category in the history window.
-  - History window: snapshots with `SnapshotTime` in the **last 48 hours**, at most **200** most recent rows for that series (sent to the model oldest-first). No new tables.
+  - Forecasts the Total series for `CarparkNo` `0` only. `countingCategory` is optional and defaults to `Total`. Any other value returns `400 {"error":"countingCategory must be Total."}`.
+  - History window: those snapshots with `SnapshotTime` in the **last 48 hours**, at most **200** most recent rows (sent to the model oldest-first). No new tables.
   - `200` body:
     ```json
     {"carParkCode":"CP1","countingCategory":"Total","model":"gemini-2.5-flash-lite",
      "forecasts":[{"hourOffset":1,"currentLevel":41,"occupancyPercent":41.0}]}
     ```
     Six items, `hourOffset` 1–6. `occupancyPercent` is `currentLevel / latest Capacity * 100` (1 decimal), or `null` when that capacity is 0.
-  - `400` bad input, or more than one category and `countingCategory` was omitted.
-  - `404` no rows in the window.
+  - `400` bad input, or `countingCategory` is not `Total`.
+  - `404` no Total `CarparkNo` `0` rows in the window.
   - `502` Gemini HTTP/transport failure or an unreadable forecast. `503` when the Gemini API key is missing or `Vertex__Model` is not a plain model id.
 
 `dotnet test` stubs history and Gemini and sends a test `X-Api-Key`. It does not call the live API and does not need `ApiKey` or `Gemini__ApiKey` in the environment. A live check is a request with `X-Api-Key` against a running API that has `ApiKey` and `Gemini__ApiKey` (or `GEMINI_API_KEY` / `Vertex__ApiKey`) set and rows already in `dbo.OccupancySnapshot`.
