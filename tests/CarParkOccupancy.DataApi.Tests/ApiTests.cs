@@ -512,12 +512,12 @@ public class ApiTests
         using var http = new HttpClient(handler);
         var reply = await new GeminiClient(http, config).GenerateAsync("history", CancellationToken.None);
 
-        Assert.Equal("gemini-2.5-flash-lite", reply.Model);
+        Assert.Equal("gemini-3.5-flash-lite", reply.Model);
         Assert.Equal("{\"ok\":true}", reply.Text);
         Assert.False(captured!.Headers.Contains("x-goog-api-key"));
         Assert.DoesNotContain("studio-key", captured.RequestUri!.ToString());
         Assert.DoesNotContain("alias-key", captured.RequestUri.ToString());
-        Assert.Equal("https://aiplatform.googleapis.com/v1/publishers/google/models/gemini-2.5-flash-lite:generateContent?key=publisher-key", captured.RequestUri.AbsoluteUri);
+        Assert.Equal("https://aiplatform.googleapis.com/v1/publishers/google/models/gemini-3.5-flash-lite:generateContent?key=publisher-key", captured.RequestUri.AbsoluteUri);
         Assert.DoesNotContain("publisher-key", requestBody);
         Assert.Contains("\"text\":\"history\"", requestBody);
         Assert.Contains("application/json", requestBody);
@@ -565,7 +565,7 @@ public class ApiTests
         Assert.Equal((int)HttpStatusCode.BadGateway, failed.StatusCode);
         Assert.Contains("429", failed.Message);
         Assert.DoesNotContain("nope", failed.Message);
-        Assert.Equal("https://aiplatform.googleapis.com/v1/publishers/google/models/gemini-2.5-flash-lite:generateContent?key=k", captured!.RequestUri!.AbsoluteUri);
+        Assert.Equal("https://aiplatform.googleapis.com/v1/publishers/google/models/gemini-3.5-flash-lite:generateContent?key=k", captured!.RequestUri!.AbsoluteUri);
 
         var missing = await Assert.ThrowsAsync<GeminiException>(() =>
             new GeminiClient(http, new ConfigurationBuilder().Build()).GenerateAsync("p", CancellationToken.None));

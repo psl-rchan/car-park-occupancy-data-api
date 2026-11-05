@@ -14,7 +14,7 @@ Minimal ASP.NET Core (.NET 10) API that ingests car park occupancy snapshots int
    `export Gemini__ApiKey="..."`
    Configuration key `Gemini:ApiKey`. This is the primary name.
    When `Gemini__ApiKey` is unset, these existing names still work: `GEMINI_API_KEY`, then `Vertex__ApiKey`.
-   Optional model override: `Vertex__Model` (default `gemini-2.5-flash-lite`).
+   Optional model override: `Vertex__Model` (default `gemini-3.5-flash-lite`).
 5. `dotnet run --project src/CarParkOccupancy.DataApi`
 
 Forecast auth is an API key on the Vertex AI publisher `generateContent` endpoint, not a service-account file and not Application Default Credentials. Project id and location are not used.
@@ -68,7 +68,7 @@ Occupancy routes require header `X-Api-Key` with the same value as `ApiKey`. A m
   - History window: those snapshots with `SnapshotTime` in the **last 48 hours**, at most **200** most recent rows (sent to the model oldest-first). No new tables.
   - `200` body:
     ```json
-    {"carParkCode":"CP1","countingCategory":"Total","model":"gemini-2.5-flash-lite",
+    {"carParkCode":"CP1","countingCategory":"Total","model":"gemini-3.5-flash-lite",
      "forecasts":[{"hourOffset":1,"currentLevel":41,"occupancyPercent":41.0}]}
     ```
     Six items, `hourOffset` 1–6. `occupancyPercent` is `currentLevel / latest Capacity * 100` (1 decimal), or `null` when that capacity is 0.

@@ -217,7 +217,7 @@ public static class OccupancyForecast
     public const int HistoryHours = 48;
     public const int MaxPoints = 200;
     public const int HorizonHours = 6;
-    public const string DefaultModel = "gemini-2.5-flash-lite";
+    public const string DefaultModel = "gemini-3.5-flash-lite";
 
     public static string BuildPrompt(string carParkCode, string category, IReadOnlyList<OccupancyPoint> points)
     {
