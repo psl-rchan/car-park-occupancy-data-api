@@ -214,8 +214,8 @@ public readonly record struct HourForecast(int HourOffset, int CurrentLevel);
 
 public static class OccupancyForecast
 {
-    public const int HistoryHours = 48;
-    public const int MaxPoints = 200;
+    public const int HistoryHours = 96;
+    public const int MaxPoints = 400;
     public const int HorizonHours = 6;
     public const string DefaultModel = "gemini-3.5-flash-lite";
 
