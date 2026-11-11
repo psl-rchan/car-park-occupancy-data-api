@@ -65,7 +65,7 @@ Occupancy routes require header `X-Api-Key` with the same value as `ApiKey`. A m
   ```
 - `GET /api/occupancy/predict?carParkCode=CP1&countingCategory=Total`
   - Forecasts the Total series for `CarparkNo` `0` only. `countingCategory` is optional and defaults to `Total`. Any other value returns `400 {"error":"countingCategory must be Total."}`.
-  - History window: those snapshots with `SnapshotTime` in the **last 48 hours**, at most **200** most recent rows (sent to the model oldest-first). No new tables.
+  - History window: those snapshots with `SnapshotTime` in the **last 96 hours**, at most **400** most recent rows (sent to the model oldest-first). No new tables.
   - `200` body:
     ```json
     {"carParkCode":"CP1","countingCategory":"Total","model":"gemini-3.5-flash-lite",
