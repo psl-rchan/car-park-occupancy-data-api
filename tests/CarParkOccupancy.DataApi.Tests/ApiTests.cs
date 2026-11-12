@@ -41,32 +41,42 @@ public class ApiTests
 
         public Task<RecentOccupancy> GetRecentAsync(string carParkCode, string? countingCategory)
         {
-            var since = DateTimeOffset.UtcNow.AddHours(-OccupancyForecast.HistoryHours);
-            var window = Rows
-                .Where(r => r.CarParkCode == carParkCode && r.CarparkNo == 0 && r.SnapshotTime >= since)
-                .Select(r => new OccupancyPoint
-                {
-                    SnapshotTime = r.SnapshotTime,
-                    CountingCategory = r.CountingCategory,
-                    CurrentLevel = r.CurrentLevel,
-                    Capacity = r.Capacity
-                })
+            var (recentSince, priorSince, priorUntil) = OccupancyForecast.SampleWindow(DateTimeOffset.UtcNow);
+            var rows = Rows
+                .Where(r => r.CarParkCode == carParkCode && r.CarparkNo == 0
+                    && (r.SnapshotTime >= recentSince || (r.SnapshotTime >= priorSince && r.SnapshotTime <= priorUntil)))
                 .ToList();
 
-            var categories = window.Select(p => p.CountingCategory).Distinct().ToList();
+            var categories = rows.Select(r => r.CountingCategory).Distinct().ToList();
             if (categories.Count == 0)
                 return Task.FromResult(new RecentOccupancy([], []));
             if (countingCategory is null && categories.Count > 1)
                 return Task.FromResult(new RecentOccupancy(categories, []));
 
             var category = countingCategory ?? categories[0];
-            var points = window
-                .Where(p => p.CountingCategory == category)
-                .OrderByDescending(p => p.SnapshotTime)
-                .Take(OccupancyForecast.MaxPoints)
+            static OccupancyPoint ToPoint(OccupancyRow r) => new()
+            {
+                SnapshotTime = r.SnapshotTime,
+                CountingCategory = r.CountingCategory,
+                CurrentLevel = r.CurrentLevel,
+                Capacity = r.Capacity
+            };
+
+            var points = rows
+                .Where(r => r.CountingCategory == category && r.SnapshotTime >= priorSince && r.SnapshotTime <= priorUntil)
+                .OrderByDescending(r => r.SnapshotTime)
+                .Take(OccupancyForecast.WindowPoints)
+                .Select(ToPoint)
+                .Concat(rows
+                    .Where(r => r.CountingCategory == category && r.SnapshotTime >= recentSince)
+                    .OrderByDescending(r => r.SnapshotTime)
+                    .Take(OccupancyForecast.WindowPoints)
+                    .Select(ToPoint))
                 .OrderBy(p => p.SnapshotTime)
                 .ToList();
-            return Task.FromResult(new RecentOccupancy(points.Count == 0 ? [] : [category], points));
+            if (points.Count == 0 || points[^1].SnapshotTime < recentSince)
+                return Task.FromResult(new RecentOccupancy([], []));
+            return Task.FromResult(new RecentOccupancy([category], points));
         }
     }
 

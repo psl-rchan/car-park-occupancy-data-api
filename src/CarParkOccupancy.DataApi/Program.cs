@@ -131,7 +131,7 @@ app.MapGet("/api/occupancy/predict", async (
 
     var recent = await store.GetRecentAsync(carParkCode, categoryFilter);
     if (recent.Points.Count == 0)
-        return Results.NotFound(new { error = $"No occupancy history in the last {OccupancyForecast.HistoryHours} hours." });
+        return Results.NotFound(new { error = $"No occupancy history in the last {OccupancyForecast.RecentHours} hours." });
 
     var usedCategory = recent.Points[^1].CountingCategory;
     var capacity = recent.Points[^1].Capacity;
@@ -214,23 +214,39 @@ public readonly record struct HourForecast(int HourOffset, int CurrentLevel);
 
 public static class OccupancyForecast
 {
-    public const int HistoryHours = 96;
-    public const int MaxPoints = 400;
+    public const int RecentHours = 48;
+    public const int WeekHours = 168;
     public const int HorizonHours = 6;
     public const string DefaultModel = "gemini-3.5-flash-lite";
+    // Four 15-minute slots per hour in the longer block, plus a few boundary rows.
+    public const int WindowPoints = (RecentHours + HorizonHours) * 4 + 8;
+
+    // Asia/Hong_Kong is UTC+8 year-round.
+    static DateTimeOffset HongKong(DateTimeOffset t) => t.ToOffset(TimeSpan.FromHours(8));
+
+    public static (DateTimeOffset RecentSince, DateTimeOffset PriorSince, DateTimeOffset PriorUntil) SampleWindow(DateTimeOffset now)
+    {
+        var weekAgo = now.AddHours(-WeekHours);
+        return (now.AddHours(-RecentHours), weekAgo.AddHours(-RecentHours), weekAgo.AddHours(HorizonHours));
+    }
 
     public static string BuildPrompt(string carParkCode, string category, IReadOnlyList<OccupancyPoint> points)
     {
         var history = string.Join(',', points.Select(p =>
-            "{\"t\":\"" + p.SnapshotTime.ToString("O", CultureInfo.InvariantCulture)
+            "{\"t\":\"" + HongKong(p.SnapshotTime).ToString("ddd yyyy-MM-dd HH:mm:ss zzz", CultureInfo.InvariantCulture)
             + "\",\"level\":" + p.CurrentLevel.ToString(CultureInfo.InvariantCulture)
             + ",\"cap\":" + p.Capacity.ToString(CultureInfo.InvariantCulture) + "}"));
         var cap = points[^1].Capacity;
+        var latest = HongKong(points[^1].SnapshotTime);
+        var weekday = latest.ToString("dddd", CultureInfo.InvariantCulture);
+        var latestText = latest.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture);
         var capRule = cap > 0 ? " Do not predict a currentLevel above " + cap.ToString(CultureInfo.InvariantCulture) + "." : "";
         var shape = """{"forecasts":[{"hourOffset":1,"currentLevel":0}]}""";
         return $"""
             Forecast CurrentLevel (vehicles currently parked) for car park {carParkCode}, counting category {category}.
-            History below is oldest-first, from the last {HistoryHours} hours, at most {MaxPoints} snapshots. Latest capacity is {cap}.
+            Times are Asia/Hong_Kong. The latest snapshot is {weekday} {latestText}. Latest capacity is {cap}.
+            History is oldest-first and skips the days in between: the same clock hours one week earlier ({RecentHours} hours before that instant through {HorizonHours} hours after it), then the last {RecentHours} hours at about 15-minute cadence.
+            Compare the same weekday and the same clock time in that history. Follow the recent 15-45 minute climb or drop rather than smoothing away lunch and evening peaks.
             Return exactly {HorizonHours} hourly forecasts for hourOffset 1 through {HorizonHours}, where 1 is one hour after the latest snapshot.
             currentLevel is an integer >= 0.{capRule}
             Reply with JSON only, no markdown, in this shape: {shape} with {HorizonHours} items.
@@ -387,15 +403,20 @@ public class SqlOccupancyStore(IConfiguration config) : IOccupancyStore
 
     public async Task<RecentOccupancy> GetRecentAsync(string carParkCode, string? countingCategory)
     {
-        var since = DateTimeOffset.UtcNow.AddHours(-OccupancyForecast.HistoryHours);
+        var (recentSince, priorSince, priorUntil) = OccupancyForecast.SampleWindow(DateTimeOffset.UtcNow);
         await using var conn = new SqlConnection(config.GetConnectionString("CentralDb"));
         await conn.OpenAsync();
 
         var categories = (await conn.QueryAsync<string>("""
             SELECT DISTINCT CountingCategory
             FROM dbo.OccupancySnapshot
-            WHERE CarParkCode = @CarParkCode AND SnapshotTime >= @Since AND CarparkNo = 0
-            """, new { CarParkCode = carParkCode, Since = since })).AsList();
+            WHERE CarParkCode = @CarParkCode
+              AND CarparkNo = 0
+              AND (
+                    SnapshotTime >= @RecentSince
+                    OR (SnapshotTime >= @PriorSince AND SnapshotTime <= @PriorUntil)
+                  )
+            """, new { CarParkCode = carParkCode, RecentSince = recentSince, PriorSince = priorSince, PriorUntil = priorUntil })).AsList();
 
         if (categories.Count == 0)
             return new RecentOccupancy([], []);
@@ -404,23 +425,42 @@ public class SqlOccupancyStore(IConfiguration config) : IOccupancyStore
 
         var category = countingCategory ?? categories[0];
         var points = (await conn.QueryAsync<OccupancyPoint>("""
-            SELECT TOP (@Take) SnapshotTime, CountingCategory, CurrentLevel, Capacity
-            FROM dbo.OccupancySnapshot
-            WHERE CarParkCode = @CarParkCode
-              AND CountingCategory = @CountingCategory
-              AND SnapshotTime >= @Since
-              AND CarparkNo = 0
-            ORDER BY SnapshotTime DESC
+            SELECT SnapshotTime, CountingCategory, CurrentLevel, Capacity
+            FROM (
+                SELECT TOP (@Take) SnapshotTime, CountingCategory, CurrentLevel, Capacity
+                FROM dbo.OccupancySnapshot
+                WHERE CarParkCode = @CarParkCode
+                  AND CountingCategory = @CountingCategory
+                  AND CarparkNo = 0
+                  AND SnapshotTime >= @RecentSince
+                ORDER BY SnapshotTime DESC
+            ) recent
+            UNION ALL
+            SELECT SnapshotTime, CountingCategory, CurrentLevel, Capacity
+            FROM (
+                SELECT TOP (@Take) SnapshotTime, CountingCategory, CurrentLevel, Capacity
+                FROM dbo.OccupancySnapshot
+                WHERE CarParkCode = @CarParkCode
+                  AND CountingCategory = @CountingCategory
+                  AND CarparkNo = 0
+                  AND SnapshotTime >= @PriorSince
+                  AND SnapshotTime <= @PriorUntil
+                ORDER BY SnapshotTime DESC
+            ) prior
+            ORDER BY SnapshotTime ASC
             """, new
         {
             CarParkCode = carParkCode,
             CountingCategory = category,
-            Since = since,
-            Take = OccupancyForecast.MaxPoints
+            RecentSince = recentSince,
+            PriorSince = priorSince,
+            PriorUntil = priorUntil,
+            Take = OccupancyForecast.WindowPoints
         })).AsList();
 
-        points.Reverse();
-        return new RecentOccupancy(points.Count == 0 ? [] : [category], points);
+        if (points.Count == 0 || points[^1].SnapshotTime < recentSince)
+            return new RecentOccupancy([], []);
+        return new RecentOccupancy([category], points);
     }
 }
 
