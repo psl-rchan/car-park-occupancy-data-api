@@ -149,6 +149,8 @@ app.MapGet("/api/occupancy/predict", async (
     if (!OccupancyForecast.TryParse(reply.Text, out var hours))
         return Results.Json(new { error = "Gemini returned an unreadable forecast." }, statusCode: StatusCodes.Status502BadGateway);
 
+    hours = OccupancyForecast.ApplyRecentSlope(recent.Points, hours);
+
     return Results.Ok(new
     {
         carParkCode,
@@ -220,6 +222,8 @@ public static class OccupancyForecast
     public const string DefaultModel = "gemini-3.5-flash-lite";
     // Four 15-minute slots per hour in the longer block, plus a few boundary rows.
     public const int WindowPoints = (RecentHours + HorizonHours) * 4 + 8;
+    // Clear fill or dump. Overnight drift (about 1 pp/hour) stays under this.
+    const double SteepPercentPerHour = 15;
 
     // Asia/Hong_Kong is UTC+8 year-round.
     static DateTimeOffset HongKong(DateTimeOffset t) => t.ToOffset(TimeSpan.FromHours(8));
@@ -241,17 +245,87 @@ public static class OccupancyForecast
         var weekday = latest.ToString("dddd", CultureInfo.InvariantCulture);
         var latestText = latest.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture);
         var capRule = cap > 0 ? " Do not predict a currentLevel above " + cap.ToString(CultureInfo.InvariantCulture) + "." : "";
+        var slopeRule = SlopeRule(points);
         var shape = """{"forecasts":[{"hourOffset":1,"currentLevel":0}]}""";
         return $"""
             Forecast CurrentLevel (vehicles currently parked) for car park {carParkCode}, counting category {category}.
             Times are Asia/Hong_Kong. The latest snapshot is {weekday} {latestText}. Latest capacity is {cap}.
             History is oldest-first and skips the days in between: the same clock hours one week earlier ({RecentHours} hours before that instant through {HorizonHours} hours after it), then the last {RecentHours} hours at about 15-minute cadence.
             Compare the same weekday and the same clock time in that history. Follow the recent 15-45 minute climb or drop rather than smoothing away lunch and evening peaks.
-            Return exactly {HorizonHours} hourly forecasts for hourOffset 1 through {HorizonHours}, where 1 is one hour after the latest snapshot.
+            {slopeRule}Return exactly {HorizonHours} hourly forecasts for hourOffset 1 through {HorizonHours}, where 1 is one hour after the latest snapshot.
             currentLevel is an integer >= 0.{capRule}
             Reply with JSON only, no markdown, in this shape: {shape} with {HorizonHours} items.
             History: [{history}]
             """;
+    }
+
+    // When the latest quarter-hours are already a steep climb or drop, replace the model hours
+    // with that slope. A flat or gentle series is returned unchanged.
+    public static IReadOnlyList<HourForecast> ApplyRecentSlope(
+        IReadOnlyList<OccupancyPoint> points, IReadOnlyList<HourForecast> forecasts)
+    {
+        if (!TrySteepPerHour(points, out var perHour))
+            return forecasts;
+
+        var latest = points[^1];
+        return forecasts
+            .Select(h => new HourForecast(h.HourOffset, ProjectLevel(latest.CurrentLevel, perHour, h.HourOffset, latest.Capacity)))
+            .ToArray();
+    }
+
+    static string SlopeRule(IReadOnlyList<OccupancyPoint> points)
+    {
+        if (!TrySteepPerHour(points, out var perHour))
+            return "";
+
+        var latest = points[^1];
+        var list = string.Join(',', Enumerable.Range(1, HorizonHours).Select(h =>
+            ProjectLevel(latest.CurrentLevel, perHour, h, latest.Capacity).ToString(CultureInfo.InvariantCulture)));
+        var rate = perHour.ToString("0", CultureInfo.InvariantCulture);
+        return $"Hard rule: recent 15-minute slope is {rate} vehicles/hour. currentLevel for hourOffset 1 through {HorizonHours} must be {list}.\n";
+    }
+
+    // Net vehicles/hour across the latest 2–4 snapshots about 15 minutes apart.
+    // A flat latest step, or a reversal in that window, is not one slope.
+    static bool TrySteepPerHour(IReadOnlyList<OccupancyPoint> points, out double perHour)
+    {
+        perHour = 0;
+        if (points.Count < 2) return false;
+        var latest = points[^1];
+        if (latest.Capacity <= 0) return false;
+
+        var picked = new List<OccupancyPoint>(4);
+        var cursor = latest.SnapshotTime;
+        for (var i = points.Count - 1; i >= 0 && picked.Count < 4; i--)
+        {
+            var p = points[i];
+            if ((latest.SnapshotTime - p.SnapshotTime).TotalMinutes > 50) break;
+            if (picked.Count > 0 && (cursor - p.SnapshotTime).TotalMinutes < 10) continue;
+            picked.Add(p);
+            cursor = p.SnapshotTime;
+        }
+
+        if (picked.Count < 2) return false;
+        var direction = Math.Sign(picked[0].CurrentLevel - picked[1].CurrentLevel);
+        if (direction == 0) return false;
+        for (var i = 1; i < picked.Count - 1; i++)
+        {
+            var delta = picked[i].CurrentLevel - picked[i + 1].CurrentLevel;
+            if (delta != 0 && Math.Sign(delta) != direction) return false;
+        }
+
+        var hours = (picked[0].SnapshotTime - picked[^1].SnapshotTime).TotalHours;
+        if (hours <= 0) return false;
+        perHour = (picked[0].CurrentLevel - picked[^1].CurrentLevel) / hours;
+        return Math.Abs(100.0 * perHour / latest.Capacity) >= SteepPercentPerHour;
+    }
+
+    static int ProjectLevel(int latest, double perHour, int hourOffset, int cap)
+    {
+        var level = (int)Math.Round(latest + perHour * hourOffset, MidpointRounding.AwayFromZero);
+        if (level < 0) level = 0;
+        if (cap > 0 && level > cap) level = cap;
+        return level;
     }
 
     public static bool TryParse(string text, out IReadOnlyList<HourForecast> forecasts)

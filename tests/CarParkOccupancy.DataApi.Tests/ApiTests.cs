@@ -157,6 +157,14 @@ public class ApiTests
     static async Task<JsonElement> Body(HttpResponseMessage res) =>
         JsonDocument.Parse(await res.Content.ReadAsStringAsync()).RootElement;
 
+    static int[] ForecastLevels(JsonElement json)
+    {
+        var forecasts = json.GetProperty("forecasts");
+        return Enumerable.Range(0, forecasts.GetArrayLength())
+            .Select(i => forecasts[i].GetProperty("currentLevel").GetInt32())
+            .ToArray();
+    }
+
     [Fact]
     public async Task Health_ReturnsOk()
     {
@@ -354,6 +362,67 @@ public class ApiTests
         var newer = gemini.LastPrompt.IndexOf("\"level\":40", StringComparison.Ordinal);
         Assert.True(older >= 0 && older < newer);
         Assert.DoesNotContain("\"level\":77", gemini.LastPrompt);
+    }
+
+    [Fact]
+    public async Task Predict_SteepRecentSlope_IsEnforced_StableIsNotRamped()
+    {
+        var (c, store, gemini) = Create();
+        var now = DateTimeOffset.UtcNow;
+
+        void Quarters(string code, params int[] levelsOldestFirst)
+        {
+            for (var i = 0; i < levelsOldestFirst.Length; i++)
+            {
+                store.Rows.Add(Point(code, "Total", levelsOldestFirst[i], capacity: 500) with
+                {
+                    SnapshotTime = now.AddMinutes(-15 * (levelsOldestFirst.Length - 1 - i))
+                });
+            }
+        }
+
+        Quarters("CLIMB", 100, 130, 160, 190);
+        Quarters("DROP", 300, 275, 250, 225);
+        Quarters("STABLE", 40, 41, 41, 42);
+
+        gemini.Text = """
+            {"forecasts":[
+              {"hourOffset":1,"currentLevel":200},
+              {"hourOffset":2,"currentLevel":210},
+              {"hourOffset":3,"currentLevel":220},
+              {"hourOffset":4,"currentLevel":230},
+              {"hourOffset":5,"currentLevel":240},
+              {"hourOffset":6,"currentLevel":250}
+            ]}
+            """;
+        var climbRes = await c.GetAsync("/api/occupancy/predict?carParkCode=CLIMB");
+        Assert.Equal(HttpStatusCode.OK, climbRes.StatusCode);
+        var climb = ForecastLevels(await Body(climbRes));
+        Assert.Equal(new[] { 310, 430, 500, 500, 500, 500 }, climb);
+        Assert.Contains("must be 310,430,500,500,500,500", gemini.LastPrompt);
+
+        gemini.Text = """
+            {"forecasts":[
+              {"hourOffset":1,"currentLevel":210},
+              {"hourOffset":2,"currentLevel":200},
+              {"hourOffset":3,"currentLevel":190},
+              {"hourOffset":4,"currentLevel":180},
+              {"hourOffset":5,"currentLevel":170},
+              {"hourOffset":6,"currentLevel":160}
+            ]}
+            """;
+        var dropRes = await c.GetAsync("/api/occupancy/predict?carParkCode=DROP");
+        Assert.Equal(HttpStatusCode.OK, dropRes.StatusCode);
+        var drop = ForecastLevels(await Body(dropRes));
+        Assert.Equal(new[] { 125, 25, 0, 0, 0, 0 }, drop);
+        Assert.Contains("must be 125,25,0,0,0,0", gemini.LastPrompt);
+
+        gemini.Text = SixHours;
+        var stableRes = await c.GetAsync("/api/occupancy/predict?carParkCode=STABLE");
+        Assert.Equal(HttpStatusCode.OK, stableRes.StatusCode);
+        var stable = ForecastLevels(await Body(stableRes));
+        Assert.Equal(new[] { 41, 42, 43, 44, 45, 46 }, stable);
+        Assert.DoesNotContain("must be", gemini.LastPrompt);
     }
 
     [Fact]
