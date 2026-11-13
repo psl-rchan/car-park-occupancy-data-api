@@ -65,7 +65,7 @@ Occupancy routes require header `X-Api-Key` with the same value as `ApiKey`. A m
   ```
 - `GET /api/occupancy/predict?carParkCode=CP1&countingCategory=Total`
   - Forecasts the Total series for `CarparkNo` `0` only. `countingCategory` is optional and defaults to `Total`. Any other value returns `400 {"error":"countingCategory must be Total."}`.
-  - History sent oldest-first for `CarparkNo` `0`: the **last 48 hours**, and the **same clock hours one week earlier** (48 hours before that instant through 6 hours after it) so last week's weekday is included. Each block keeps at most **224** rows, which fits a 15-minute cadence; last week is not dropped to keep newer rows. A recent row is required. Prompt times are Asia/Hong_Kong local time, with the weekday, and the model is told to follow the recent 15–45 minute slope. No new tables.
+  - History sent oldest-first for `CarparkNo` `0`: the **last 48 hours**, and the **same clock hours one week earlier** (48 hours before that instant through 6 hours after it) so last week's weekday is included. Each block keeps at most **224** rows, which fits a 15-minute cadence; last week is not dropped to keep newer rows. A recent row is required. Prompt times are Asia/Hong_Kong local time, with the weekday. When the latest 2–4 quarter-hour snapshots are a steep climb or drop (at least 15% of capacity per hour), the prompt states that slope and the exact hour 1–6 levels, and the forecast is set to those levels, still capped at 0 and capacity. A flat or gentle recent series is left unchanged. No new tables.
   - `200` body:
     ```json
     {"carParkCode":"CP1","countingCategory":"Total","model":"gemini-3.5-flash-lite",
