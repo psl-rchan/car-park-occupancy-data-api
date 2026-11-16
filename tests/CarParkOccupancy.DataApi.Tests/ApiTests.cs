@@ -343,8 +343,10 @@ public class ApiTests
         var noonWindow = OccupancyForecast.SampleWindow(noon);
         Assert.Equal(noon.AddHours(-OccupancyForecast.RecentHours), noonWindow.RecentSince);
         Assert.Equal(noon.AddHours(-(OccupancyForecast.WeekHours + OccupancyForecast.RecentHours)), noonWindow.PriorSince);
-        Assert.Equal(new DateTimeOffset(2026, 11, 9, 2, 0, 0, hk), noonWindow.PriorUntil);
+        Assert.Equal(new DateTimeOffset(2026, 11, 9, 8, 0, 0, hk), noonWindow.PriorUntil);
         Assert.True(noonWindow.PriorUntil > noon.AddHours(-OccupancyForecast.WeekHours).AddHours(OccupancyForecast.HorizonHours));
+        Assert.True(new DateTimeOffset(2026, 11, 9, 5, 0, 0, hk) <= noonWindow.PriorUntil);
+        Assert.True(new DateTimeOffset(2026, 11, 9, 9, 0, 0, hk) > noonWindow.PriorUntil);
         Assert.True((noonWindow.PriorUntil - new DateTimeOffset(2026, 11, 8, 17, 0, 0, hk)).TotalHours * 4 <= OccupancyForecast.WindowPoints);
 
         var late = new DateTimeOffset(2026, 11, 15, 22, 0, 0, hk);
@@ -352,13 +354,14 @@ public class ApiTests
         var lateWeekAgo = late.AddHours(-OccupancyForecast.WeekHours);
         Assert.Equal(late.AddHours(-OccupancyForecast.RecentHours), lateWindow.RecentSince);
         Assert.Equal(lateWeekAgo.AddHours(-OccupancyForecast.RecentHours), lateWindow.PriorSince);
-        Assert.Equal(lateWeekAgo.AddHours(OccupancyForecast.HorizonHours), lateWindow.PriorUntil);
+        Assert.True(lateWindow.PriorUntil > lateWeekAgo.AddHours(OccupancyForecast.HorizonHours));
+        Assert.Equal(new DateTimeOffset(2026, 11, 9, 8, 0, 0, hk), lateWindow.PriorUntil);
 
         var early = new DateTimeOffset(2026, 11, 16, 1, 0, 0, hk);
         var earlyWindow = OccupancyForecast.SampleWindow(early);
         Assert.Equal(early.AddHours(-OccupancyForecast.RecentHours), earlyWindow.RecentSince);
         Assert.Equal(early.AddHours(-(OccupancyForecast.WeekHours + OccupancyForecast.RecentHours)), earlyWindow.PriorSince);
-        Assert.Equal(new DateTimeOffset(2026, 11, 10, 2, 0, 0, hk), earlyWindow.PriorUntil);
+        Assert.Equal(new DateTimeOffset(2026, 11, 10, 8, 0, 0, hk), earlyWindow.PriorUntil);
 
         var noonUtc = new DateTimeOffset(2026, 11, 15, 4, 0, 0, TimeSpan.Zero);
         Assert.Equal(noonWindow.PriorUntil, OccupancyForecast.SampleWindow(noonUtc).PriorUntil);
@@ -506,6 +509,67 @@ public class ApiTests
         var stable = ForecastLevels(await Body(stableRes));
         Assert.Equal(new[] { 41, 42, 43, 44, 45, 46 }, stable);
         Assert.DoesNotContain("must be", gemini.LastPrompt);
+    }
+
+    [Fact]
+    public async Task Predict_ResidualFloor_LiftsSlopeZeros_AndDoesNotRebound()
+    {
+        var (c, store, gemini) = Create();
+        gemini.Text = SixHours;
+        var now = DateTimeOffset.UtcNow;
+        var hk = now.ToOffset(TimeSpan.FromHours(8));
+        var weekAgo = hk.AddHours(-OccupancyForecast.WeekHours);
+        var start = new DateTimeOffset(weekAgo.Year, weekAgo.Month, weekAgo.Day, 17, 0, 0, hk.Offset);
+        var low = start.AddHours(12);
+
+        void Row(string code, DateTimeOffset t, int level, int capacity) =>
+            store.Rows.Add(Point(code, "Total", level, capacity) with { SnapshotTime = t });
+
+        void Quarters(string code, int capacity, params int[] levelsOldestFirst)
+        {
+            for (var i = 0; i < levelsOldestFirst.Length; i++)
+                Row(code, now.AddMinutes(-15 * (levelsOldestFirst.Length - 1 - i)), levelsOldestFirst[i], capacity);
+        }
+
+        void Overnight(string code, int capacity, int evening, int bottom)
+        {
+            Row(code, start, evening, capacity);
+            Row(code, start.AddHours(2), evening - 10, capacity);
+            Row(code, low, bottom, capacity);
+            Row(code, start.AddHours(15), bottom + 1, capacity);
+        }
+
+        Quarters("LIFT", 85, 79, 70, 60, 50);
+        Overnight("LIFT", 85, 70, 8);
+        Quarters("ABOVE", 100, 40, 40, 40, 40);
+        Overnight("ABOVE", 100, 90, 8);
+        Quarters("BELOW", 100, 34, 24, 15, 5);
+        Overnight("BELOW", 100, 80, 14);
+        Quarters("MISS", 85, 79, 70, 60, 50);
+        Row("MISS", start.AddHours(-2), 1, 85);
+        Row("MISS", start.AddHours(16), 1, 85);
+
+        var liftRes = await c.GetAsync("/api/occupancy/predict?carParkCode=LIFT");
+        Assert.Equal(HttpStatusCode.OK, liftRes.StatusCode);
+        var liftJson = await Body(liftRes);
+        Assert.Equal(new[] { 11, 8, 8, 8, 8, 8 }, ForecastLevels(liftJson));
+        var liftHours = liftJson.GetProperty("forecasts");
+        Assert.Equal(Math.Round(100.0 * 11 / 85, 1), liftHours[0].GetProperty("occupancyPercent").GetDouble(), 3);
+        Assert.Equal(Math.Round(100.0 * 8 / 85, 1), liftHours[1].GetProperty("occupancyPercent").GetDouble(), 3);
+
+        var aboveRes = await c.GetAsync("/api/occupancy/predict?carParkCode=ABOVE");
+        Assert.Equal(HttpStatusCode.OK, aboveRes.StatusCode);
+        var aboveJson = await Body(aboveRes);
+        Assert.Equal(new[] { 41, 42, 43, 44, 45, 46 }, ForecastLevels(aboveJson));
+        Assert.Equal(41.0, aboveJson.GetProperty("forecasts")[0].GetProperty("occupancyPercent").GetDouble(), 3);
+
+        var belowRes = await c.GetAsync("/api/occupancy/predict?carParkCode=BELOW");
+        Assert.Equal(HttpStatusCode.OK, belowRes.StatusCode);
+        Assert.Equal(new[] { 5, 5, 5, 5, 5, 5 }, ForecastLevels(await Body(belowRes)));
+
+        var missRes = await c.GetAsync("/api/occupancy/predict?carParkCode=MISS");
+        Assert.Equal(HttpStatusCode.OK, missRes.StatusCode);
+        Assert.Equal(new[] { 11, 0, 0, 0, 0, 0 }, ForecastLevels(await Body(missRes)));
     }
 
     [Fact]
