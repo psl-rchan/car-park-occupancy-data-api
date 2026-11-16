@@ -150,6 +150,7 @@ app.MapGet("/api/occupancy/predict", async (
         return Results.Json(new { error = "Gemini returned an unreadable forecast." }, statusCode: StatusCodes.Status502BadGateway);
 
     hours = OccupancyForecast.ApplyRecentSlope(recent.Points, hours);
+    hours = OccupancyForecast.ApplyResidualFloor(recent.Points, hours);
 
     return Results.Ok(new
     {
@@ -233,14 +234,22 @@ public static class OccupancyForecast
         var weekAgo = now.AddHours(-WeekHours);
         var clockUntil = weekAgo.AddHours(HorizonHours);
         var emptyingEnd = EmptyingStart(now).AddHours(9);
+        var priorUntil = clockUntil > emptyingEnd ? clockUntil : emptyingEnd;
+        var overnightEnd = OvernightEnd(now);
         return (now.AddHours(-RecentHours), weekAgo.AddHours(-RecentHours),
-            clockUntil > emptyingEnd ? clockUntil : emptyingEnd);
+            overnightEnd > priorUntil ? overnightEnd : priorUntil);
     }
 
     static DateTimeOffset EmptyingStart(DateTimeOffset instant)
     {
         var hk = HongKong(instant.AddHours(-WeekHours));
         return new DateTimeOffset(hk.Year, hk.Month, hk.Day, 17, 0, 0, hk.Offset);
+    }
+
+    static DateTimeOffset OvernightEnd(DateTimeOffset instant)
+    {
+        var start = EmptyingStart(instant);
+        return new DateTimeOffset(start.Year, start.Month, start.Day, 8, 0, 0, start.Offset).AddDays(1);
     }
 
     public static string BuildPrompt(string carParkCode, string category, IReadOnlyList<OccupancyPoint> points)
@@ -328,6 +337,33 @@ public static class OccupancyForecast
         return forecasts
             .Select(h => new HourForecast(h.HourOffset, ProjectLevel(latest.CurrentLevel, perHour, h.HourOffset, latest.Capacity)))
             .ToArray();
+    }
+
+    public static IReadOnlyList<HourForecast> ApplyResidualFloor(
+        IReadOnlyList<OccupancyPoint> points, IReadOnlyList<HourForecast> forecasts)
+    {
+        if (points.Count == 0) return forecasts;
+        var latest = points[^1];
+        var start = EmptyingStart(latest.SnapshotTime);
+        var end = OvernightEnd(latest.SnapshotTime);
+        int? overnightMin = null;
+        foreach (var p in points)
+        {
+            if (p.SnapshotTime < start || p.SnapshotTime > end) continue;
+            if (overnightMin is null || p.CurrentLevel < overnightMin)
+                overnightMin = p.CurrentLevel;
+        }
+
+        if (overnightMin is null) return forecasts;
+        var floor = latest.CurrentLevel < overnightMin ? latest.CurrentLevel : overnightMin.Value;
+        var cap = latest.Capacity;
+        return forecasts.Select(h =>
+        {
+            var level = h.CurrentLevel < floor ? floor : h.CurrentLevel;
+            if (level < 0) level = 0;
+            if (cap > 0 && level > cap) level = cap;
+            return new HourForecast(h.HourOffset, level);
+        }).ToArray();
     }
 
     static string SlopeRule(IReadOnlyList<OccupancyPoint> points)
