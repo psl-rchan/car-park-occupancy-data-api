@@ -336,6 +336,89 @@ public class ApiTests
     }
 
     [Fact]
+    public void SampleWindow_ExtendsPriorUntil_ThroughSameWeekdayEmptying()
+    {
+        var hk = TimeSpan.FromHours(8);
+        var noon = new DateTimeOffset(2026, 11, 15, 12, 0, 0, hk);
+        var noonWindow = OccupancyForecast.SampleWindow(noon);
+        Assert.Equal(noon.AddHours(-OccupancyForecast.RecentHours), noonWindow.RecentSince);
+        Assert.Equal(noon.AddHours(-(OccupancyForecast.WeekHours + OccupancyForecast.RecentHours)), noonWindow.PriorSince);
+        Assert.Equal(new DateTimeOffset(2026, 11, 9, 2, 0, 0, hk), noonWindow.PriorUntil);
+        Assert.True(noonWindow.PriorUntil > noon.AddHours(-OccupancyForecast.WeekHours).AddHours(OccupancyForecast.HorizonHours));
+        Assert.True((noonWindow.PriorUntil - new DateTimeOffset(2026, 11, 8, 17, 0, 0, hk)).TotalHours * 4 <= OccupancyForecast.WindowPoints);
+
+        var late = new DateTimeOffset(2026, 11, 15, 22, 0, 0, hk);
+        var lateWindow = OccupancyForecast.SampleWindow(late);
+        var lateWeekAgo = late.AddHours(-OccupancyForecast.WeekHours);
+        Assert.Equal(late.AddHours(-OccupancyForecast.RecentHours), lateWindow.RecentSince);
+        Assert.Equal(lateWeekAgo.AddHours(-OccupancyForecast.RecentHours), lateWindow.PriorSince);
+        Assert.Equal(lateWeekAgo.AddHours(OccupancyForecast.HorizonHours), lateWindow.PriorUntil);
+
+        var early = new DateTimeOffset(2026, 11, 16, 1, 0, 0, hk);
+        var earlyWindow = OccupancyForecast.SampleWindow(early);
+        Assert.Equal(early.AddHours(-OccupancyForecast.RecentHours), earlyWindow.RecentSince);
+        Assert.Equal(early.AddHours(-(OccupancyForecast.WeekHours + OccupancyForecast.RecentHours)), earlyWindow.PriorSince);
+        Assert.Equal(new DateTimeOffset(2026, 11, 10, 2, 0, 0, hk), earlyWindow.PriorUntil);
+
+        var noonUtc = new DateTimeOffset(2026, 11, 15, 4, 0, 0, TimeSpan.Zero);
+        Assert.Equal(noonWindow.PriorUntil, OccupancyForecast.SampleWindow(noonUtc).PriorUntil);
+    }
+
+    [Fact]
+    public void BuildPrompt_LabelsLastWeekCurve_AndOmitsWhenThosePointsAreMissing()
+    {
+        var hk = TimeSpan.FromHours(8);
+        var latest = new DateTimeOffset(2026, 11, 15, 12, 7, 0, hk);
+        var weekAgo = latest.AddHours(-OccupancyForecast.WeekHours);
+        OccupancyPoint At(DateTimeOffset t, int level) => new()
+        {
+            SnapshotTime = t,
+            CountingCategory = "Total",
+            CurrentLevel = level,
+            Capacity = 400
+        };
+
+        var points = new List<OccupancyPoint>
+        {
+            At(weekAgo, 200),
+            At(weekAgo.AddHours(4), 250),
+            At(new DateTimeOffset(2026, 11, 8, 17, 0, 0, hk), 380),
+            At(new DateTimeOffset(2026, 11, 8, 20, 0, 0, hk), 140),
+            At(new DateTimeOffset(2026, 11, 9, 2, 0, 0, hk), 45),
+            At(latest.AddMinutes(-15), 205),
+            At(latest, 210)
+        };
+
+        var prompt = OccupancyForecast.BuildPrompt("CP1", "Total", points);
+        Assert.Contains("through the later of 6 hours after it and 02:00 the next morning", prompt);
+        Assert.Contains("last 48 hours at about 15-minute cadence", prompt);
+        Assert.Contains("Do not predict a currentLevel above 400.", prompt);
+        Assert.Contains("\"t\":\"Sun 2026-11-15 11:52:00 +08:00\",\"level\":205,\"cap\":400", prompt);
+        Assert.Contains("\"t\":\"Sun 2026-11-15 12:07:00 +08:00\",\"level\":210,\"cap\":400", prompt);
+        var older = prompt.IndexOf("\"level\":205", StringComparison.Ordinal);
+        var newer = prompt.IndexOf("\"level\":210", StringComparison.Ordinal);
+        Assert.True(older >= 0 && older < newer);
+
+        Assert.Contains("Last week's same-weekday emptying curve (hourly actuals, Asia/Hong_Kong, 17:00 through 02:00 the next morning):", prompt);
+        Assert.Contains("Sunday 2026-11-08 17:00 level 380 cap 400", prompt);
+        Assert.Contains("Sunday 2026-11-08 20:00 level 140 cap 400", prompt);
+        Assert.Contains("Monday 2026-11-09 02:00 level 45 cap 400", prompt);
+        Assert.Contains("Use this curve for emptying: when the drop starts, how fast it falls, and how much occupancy remains after it bottoms out. Do not predict 0 at an hour offset where last week still had residual cars. Do not smooth away the evening drop.", prompt);
+        Assert.DoesNotContain("Hard rule:", prompt);
+
+        Assert.Contains("Last week at this clock time and the next 6 hours (Asia/Hong_Kong):", prompt);
+        Assert.Contains("Sunday 2026-11-08 12:07 level 200 cap 400", prompt);
+        Assert.Contains("Sunday 2026-11-08 16:07 level 250 cap 400", prompt);
+
+        var recentOnly = OccupancyForecast.BuildPrompt("CP1", "Total", [At(latest, 210)]);
+        Assert.Contains("\"t\":\"Sun 2026-11-15 12:07:00 +08:00\",\"level\":210,\"cap\":400", recentOnly);
+        Assert.Contains("15-minute cadence", recentOnly);
+        Assert.DoesNotContain("emptying curve", recentOnly);
+        Assert.DoesNotContain("this clock time and the next 6 hours", recentOnly);
+        Assert.DoesNotContain("Do not predict 0", recentOnly);
+    }
+
+    [Fact]
     public async Task Predict_WithHistory_ReturnsSixHours()
     {
         var (c, store, gemini) = Create();
