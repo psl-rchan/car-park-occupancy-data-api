@@ -1,5 +1,5 @@
 ﻿-- Restore the word District on dbo.CarPark English district names.
--- RegionEn values (Hong Kong Island, Kowloon, New Territories) are unchanged.
+-- AreaEn values (Hong Kong Island, Kowloon, New Territories) are unchanged.
 -- Chinese District values (including 區) are unchanged.
 -- Does not alter dbo.OccupancySnapshot.
 -- Idempotent: safe if names already end with ' District' or constraints were already replaced.
@@ -22,10 +22,10 @@ GO
 
 IF EXISTS (
     SELECT 1 FROM sys.check_constraints
-    WHERE name = N'CK_CarPark_RegionEnDistrictEn'
+    WHERE name = N'CK_CarPark_AreaEnDistrictEn'
       AND parent_object_id = OBJECT_ID(N'dbo.CarPark')
 )
-    ALTER TABLE dbo.CarPark DROP CONSTRAINT CK_CarPark_RegionEnDistrictEn;
+    ALTER TABLE dbo.CarPark DROP CONSTRAINT CK_CarPark_AreaEnDistrictEn;
 GO
 
 UPDATE dbo.CarPark
@@ -81,16 +81,16 @@ GO
 
 IF NOT EXISTS (
     SELECT 1 FROM sys.check_constraints
-    WHERE name = N'CK_CarPark_RegionEnDistrictEn'
+    WHERE name = N'CK_CarPark_AreaEnDistrictEn'
       AND parent_object_id = OBJECT_ID(N'dbo.CarPark')
 )
 BEGIN
-    ALTER TABLE dbo.CarPark ADD CONSTRAINT CK_CarPark_RegionEnDistrictEn CHECK (
-        RegionEn IS NULL
+    ALTER TABLE dbo.CarPark ADD CONSTRAINT CK_CarPark_AreaEnDistrictEn CHECK (
+        AreaEn IS NULL
         OR DistrictEn IS NULL
-        OR (RegionEn = N'Hong Kong Island' AND DistrictEn IN (N'Central and Western District', N'Wan Chai District', N'Eastern District', N'Southern District'))
-        OR (RegionEn = N'Kowloon' AND DistrictEn IN (N'Yau Tsim Mong District', N'Sham Shui Po District', N'Kowloon City District', N'Wong Tai Sin District', N'Kwun Tong District'))
-        OR (RegionEn = N'New Territories' AND DistrictEn IN (N'Tsuen Wan District', N'Tuen Mun District', N'Yuen Long District', N'North District', N'Tai Po District', N'Sha Tin District', N'Sai Kung District', N'Kwai Tsing District', N'Islands District'))
+        OR (AreaEn = N'Hong Kong Island' AND DistrictEn IN (N'Central and Western District', N'Wan Chai District', N'Eastern District', N'Southern District'))
+        OR (AreaEn = N'Kowloon' AND DistrictEn IN (N'Yau Tsim Mong District', N'Sham Shui Po District', N'Kowloon City District', N'Wong Tai Sin District', N'Kwun Tong District'))
+        OR (AreaEn = N'New Territories' AND DistrictEn IN (N'Tsuen Wan District', N'Tuen Mun District', N'Yuen Long District', N'North District', N'Tai Po District', N'Sha Tin District', N'Sai Kung District', N'Kwai Tsing District', N'Islands District'))
     );
 END
 GO

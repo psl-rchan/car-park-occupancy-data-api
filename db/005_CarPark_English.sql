@@ -1,25 +1,25 @@
 ﻿-- English (中英對照) columns for dbo.CarPark region and district.
 -- Does not alter dbo.OccupancySnapshot.
--- RegionEn / DistrictEn stay nullable so unmapped parks remain empty
--- until the Chinese Region / District values are filled.
+-- AreaEn / DistrictEn stay nullable so unmapped parks remain empty
+-- until the Chinese Area / District values are filled.
 
-IF COL_LENGTH(N'dbo.CarPark', N'RegionEn') IS NULL
+IF COL_LENGTH(N'dbo.CarPark', N'AreaEn') IS NULL
    AND COL_LENGTH(N'dbo.CarPark', N'DistrictEn') IS NULL
 BEGIN
     ALTER TABLE dbo.CarPark ADD
-        RegionEn   NVARCHAR(40) NULL,
+        AreaEn   NVARCHAR(40) NULL,
         DistrictEn NVARCHAR(40) NULL;
 END
 GO
 
 IF NOT EXISTS (
     SELECT 1 FROM sys.check_constraints
-    WHERE name = N'CK_CarPark_RegionEn'
+    WHERE name = N'CK_CarPark_AreaEn'
       AND parent_object_id = OBJECT_ID(N'dbo.CarPark')
 )
 BEGIN
-    ALTER TABLE dbo.CarPark ADD CONSTRAINT CK_CarPark_RegionEn CHECK (
-        RegionEn IS NULL OR RegionEn IN (N'Hong Kong Island', N'Kowloon', N'New Territories')
+    ALTER TABLE dbo.CarPark ADD CONSTRAINT CK_CarPark_AreaEn CHECK (
+        AreaEn IS NULL OR AreaEn IN (N'Hong Kong Island', N'Kowloon', N'New Territories')
     );
 END
 GO
@@ -43,15 +43,15 @@ GO
 
 IF NOT EXISTS (
     SELECT 1 FROM sys.check_constraints
-    WHERE name = N'CK_CarPark_RegionEn_Match'
+    WHERE name = N'CK_CarPark_AreaEn_Match'
       AND parent_object_id = OBJECT_ID(N'dbo.CarPark')
 )
 BEGIN
-    ALTER TABLE dbo.CarPark ADD CONSTRAINT CK_CarPark_RegionEn_Match CHECK (
-        RegionEn IS NULL OR (
-            (Region = N'香港島' AND RegionEn = N'Hong Kong Island') OR
-            (Region = N'九龍' AND RegionEn = N'Kowloon') OR
-            (Region = N'新界' AND RegionEn = N'New Territories')
+    ALTER TABLE dbo.CarPark ADD CONSTRAINT CK_CarPark_AreaEn_Match CHECK (
+        AreaEn IS NULL OR (
+            (Area = N'香港島' AND AreaEn = N'Hong Kong Island') OR
+            (Area = N'九龍' AND AreaEn = N'Kowloon') OR
+            (Area = N'新界' AND AreaEn = N'New Territories')
         )
     );
 END
@@ -90,25 +90,25 @@ GO
 
 IF NOT EXISTS (
     SELECT 1 FROM sys.check_constraints
-    WHERE name = N'CK_CarPark_RegionEnDistrictEn'
+    WHERE name = N'CK_CarPark_AreaEnDistrictEn'
       AND parent_object_id = OBJECT_ID(N'dbo.CarPark')
 )
 BEGIN
-    ALTER TABLE dbo.CarPark ADD CONSTRAINT CK_CarPark_RegionEnDistrictEn CHECK (
-        RegionEn IS NULL
+    ALTER TABLE dbo.CarPark ADD CONSTRAINT CK_CarPark_AreaEnDistrictEn CHECK (
+        AreaEn IS NULL
         OR DistrictEn IS NULL
-        OR (RegionEn = N'Hong Kong Island' AND DistrictEn IN (N'Central and Western District', N'Wan Chai District', N'Eastern District', N'Southern District'))
-        OR (RegionEn = N'Kowloon' AND DistrictEn IN (N'Yau Tsim Mong District', N'Sham Shui Po District', N'Kowloon City District', N'Wong Tai Sin District', N'Kwun Tong District'))
-        OR (RegionEn = N'New Territories' AND DistrictEn IN (N'Tsuen Wan District', N'Tuen Mun District', N'Yuen Long District', N'North District', N'Tai Po District', N'Sha Tin District', N'Sai Kung District', N'Kwai Tsing District', N'Islands District'))
+        OR (AreaEn = N'Hong Kong Island' AND DistrictEn IN (N'Central and Western District', N'Wan Chai District', N'Eastern District', N'Southern District'))
+        OR (AreaEn = N'Kowloon' AND DistrictEn IN (N'Yau Tsim Mong District', N'Sham Shui Po District', N'Kowloon City District', N'Wong Tai Sin District', N'Kwun Tong District'))
+        OR (AreaEn = N'New Territories' AND DistrictEn IN (N'Tsuen Wan District', N'Tuen Mun District', N'Yuen Long District', N'North District', N'Tai Po District', N'Sha Tin District', N'Sai Kung District', N'Kwai Tsing District', N'Islands District'))
     );
 END
 GO
 
--- Fill English only where Chinese Region and District are already set
+-- Fill English only where Chinese Area and District are already set
 -- and English is still empty. Leaves unmapped parks empty.
 UPDATE dbo.CarPark
 SET
-    RegionEn = CASE Region
+    AreaEn = CASE Area
         WHEN N'香港島' THEN N'Hong Kong Island'
         WHEN N'九龍' THEN N'Kowloon'
         WHEN N'新界' THEN N'New Territories'
@@ -133,8 +133,8 @@ SET
         WHEN N'葵青區' THEN N'Kwai Tsing District'
         WHEN N'離島區' THEN N'Islands District'
     END
-WHERE Region IS NOT NULL
+WHERE Area IS NOT NULL
   AND District IS NOT NULL
-  AND RegionEn IS NULL
+  AND AreaEn IS NULL
   AND DistrictEn IS NULL;
 GO
