@@ -231,7 +231,16 @@ public static class OccupancyForecast
     public static (DateTimeOffset RecentSince, DateTimeOffset PriorSince, DateTimeOffset PriorUntil) SampleWindow(DateTimeOffset now)
     {
         var weekAgo = now.AddHours(-WeekHours);
-        return (now.AddHours(-RecentHours), weekAgo.AddHours(-RecentHours), weekAgo.AddHours(HorizonHours));
+        var clockUntil = weekAgo.AddHours(HorizonHours);
+        var emptyingEnd = EmptyingStart(now).AddHours(9);
+        return (now.AddHours(-RecentHours), weekAgo.AddHours(-RecentHours),
+            clockUntil > emptyingEnd ? clockUntil : emptyingEnd);
+    }
+
+    static DateTimeOffset EmptyingStart(DateTimeOffset instant)
+    {
+        var hk = HongKong(instant.AddHours(-WeekHours));
+        return new DateTimeOffset(hk.Year, hk.Month, hk.Day, 17, 0, 0, hk.Offset);
     }
 
     public static string BuildPrompt(string carParkCode, string category, IReadOnlyList<OccupancyPoint> points)
@@ -241,22 +250,70 @@ public static class OccupancyForecast
             + "\",\"level\":" + p.CurrentLevel.ToString(CultureInfo.InvariantCulture)
             + ",\"cap\":" + p.Capacity.ToString(CultureInfo.InvariantCulture) + "}"));
         var cap = points[^1].Capacity;
-        var latest = HongKong(points[^1].SnapshotTime);
+        var latestInstant = points[^1].SnapshotTime;
+        var latest = HongKong(latestInstant);
         var weekday = latest.ToString("dddd", CultureInfo.InvariantCulture);
         var latestText = latest.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture);
         var capRule = cap > 0 ? " Do not predict a currentLevel above " + cap.ToString(CultureInfo.InvariantCulture) + "." : "";
         var slopeRule = SlopeRule(points);
+        var curve = HourlyNear(points, EmptyingStart(latestInstant), 10);
+        var clock = HourlyNear(points, latestInstant.AddHours(-WeekHours), HorizonHours + 1);
+        var blocks = LabeledBlock(
+            "Last week's same-weekday emptying curve (hourly actuals, Asia/Hong_Kong, 17:00 through 02:00 the next morning):",
+            curve);
+        if (curve.Count > 0)
+            blocks += "\nUse this curve for emptying: when the drop starts, how fast it falls, and how much occupancy remains after it bottoms out. Do not predict 0 at an hour offset where last week still had residual cars. Do not smooth away the evening drop.";
+        blocks += LabeledBlock(
+            "Last week at this clock time and the next 6 hours (Asia/Hong_Kong):",
+            clock);
         var shape = """{"forecasts":[{"hourOffset":1,"currentLevel":0}]}""";
         return $"""
             Forecast CurrentLevel (vehicles currently parked) for car park {carParkCode}, counting category {category}.
             Times are Asia/Hong_Kong. The latest snapshot is {weekday} {latestText}. Latest capacity is {cap}.
-            History is oldest-first and skips the days in between: the same clock hours one week earlier ({RecentHours} hours before that instant through {HorizonHours} hours after it), then the last {RecentHours} hours at about 15-minute cadence.
+            History is oldest-first and skips the days in between: the same clock hours one week earlier (from {RecentHours} hours before that instant through the later of {HorizonHours} hours after it and 02:00 the next morning), then the last {RecentHours} hours at about 15-minute cadence.
             Compare the same weekday and the same clock time in that history. Follow the recent 15-45 minute climb or drop rather than smoothing away lunch and evening peaks.
             {slopeRule}Return exactly {HorizonHours} hourly forecasts for hourOffset 1 through {HorizonHours}, where 1 is one hour after the latest snapshot.
             currentLevel is an integer >= 0.{capRule}
             Reply with JSON only, no markdown, in this shape: {shape} with {HorizonHours} items.
-            History: [{history}]
+            History: [{history}]{blocks}
             """;
+    }
+
+    static List<OccupancyPoint> HourlyNear(IReadOnlyList<OccupancyPoint> points, DateTimeOffset first, int count)
+    {
+        var picked = new List<OccupancyPoint>(count);
+        for (var h = 0; h < count; h++)
+        {
+            var target = first.AddHours(h);
+            OccupancyPoint? best = null;
+            var bestMinutes = 31.0;
+            foreach (var p in points)
+            {
+                var minutes = Math.Abs((p.SnapshotTime - target).TotalMinutes);
+                if (minutes <= 30 && minutes < bestMinutes)
+                {
+                    best = p;
+                    bestMinutes = minutes;
+                }
+            }
+
+            if (best is not null && (picked.Count == 0 || picked[^1].SnapshotTime != best.SnapshotTime))
+                picked.Add(best);
+        }
+
+        return picked;
+    }
+
+    static string LabeledBlock(string title, IReadOnlyList<OccupancyPoint> rows)
+    {
+        if (rows.Count == 0) return "";
+        return "\n" + title + "\n" + string.Join('\n', rows.Select(p =>
+        {
+            var t = HongKong(p.SnapshotTime);
+            return t.ToString("dddd yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture)
+                + " level " + p.CurrentLevel.ToString(CultureInfo.InvariantCulture)
+                + " cap " + p.Capacity.ToString(CultureInfo.InvariantCulture);
+        }));
     }
 
     // When the latest quarter-hours are already a steep climb or drop, replace the model hours
