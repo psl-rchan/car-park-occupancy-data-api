@@ -3,7 +3,7 @@
 Minimal ASP.NET Core (.NET 10) API that ingests car park occupancy snapshots into a central SQL Server DB and forecasts the next 6 hours of `CurrentLevel` with the Gemini API.
 
 ## Run
-1. Create the table: run `db/001_OccupancySnapshot.sql` against your DB (creates `dbo.OccupancySnapshot`), then `db/002_OccupancySnapshot_Indexes.sql` and `db/003_OccupancySnapshot_History_Index.sql`.
+1. With DBA authorization, run the numbered scripts in `db/` in order (`001` through `010`) against your DB. These create `dbo.OccupancySnapshot`, its indexes, and the `dbo.CarPark` catalog required by `GET /api/occupancy/latest`. Existing installations should apply only outstanding scripts. `db/010_CarPark_IsClosed.sql` adds `IsClosed BIT NOT NULL DEFAULT (0)`, preserving existing catalog rows as open; it does not mark any park closed or alter snapshots. Apply it before running this API version, which filters latest occupancy on `IsClosed = 0`. Scripts are not applied automatically on startup.
 2. Set the connection string (never commit it):
    `export ConnectionStrings__CentralDb="Server=...;Database=...;User Id=...;Password=...;TrustServerCertificate=True"`
    (or `ConnectionStrings:CentralDb` in configuration/user-secrets)
