@@ -180,6 +180,15 @@ public record OccupancyRow
     public required int OccupancyLimit { get; init; }
     public required int CurrentLevel { get; init; }
     public required int Capacity { get; init; }
+    // Nullable dbo.CarPark catalog fields (LEFT JOIN on latest only).
+    public string? Area { get; init; }
+    public string? District { get; init; }
+    public string? SubDistrict { get; init; }
+    public string? AreaEn { get; init; }
+    public string? DistrictEn { get; init; }
+    public string? SubDistrictEn { get; init; }
+    public string? Name { get; init; }
+    public string? NameEn { get; init; }
 }
 
 public sealed class OccupancyPoint
@@ -511,8 +520,11 @@ public class SqlOccupancyStore(IConfiguration config) : IOccupancyStore
         """;
 
     private const string LatestSql = """
-        SELECT CarParkCode, SnapshotTime, CarparkNo, CarparkDesig, CountingCategoryNo, CountingCategory,
-               FreeLimit, OccupancyLimit, CurrentLevel, Capacity
+        SELECT latest.CarParkCode, latest.SnapshotTime, latest.CarparkNo, latest.CarparkDesig,
+               latest.CountingCategoryNo, latest.CountingCategory,
+               latest.FreeLimit, latest.OccupancyLimit, latest.CurrentLevel, latest.Capacity,
+               cp.Area, cp.District, cp.SubDistrict, cp.AreaEn, cp.DistrictEn, cp.SubDistrictEn,
+               cp.Name, cp.NameEn
         FROM (
             SELECT *,
                    ROW_NUMBER() OVER (
@@ -521,8 +533,9 @@ public class SqlOccupancyStore(IConfiguration config) : IOccupancyStore
             FROM dbo.OccupancySnapshot
             WHERE CarparkNo = 0
         ) latest
+        LEFT JOIN dbo.CarPark cp ON cp.CarParkCode = latest.CarParkCode
         WHERE rn = 1
-        ORDER BY CarParkCode, CountingCategory
+        ORDER BY latest.CarParkCode, latest.CountingCategory
         """;
 
     private const string HistorySql = """

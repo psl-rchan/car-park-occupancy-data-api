@@ -253,6 +253,78 @@ public class ApiTests
         Assert.Equal("CP2", json[1].GetProperty("carParkCode").GetString());
         Assert.Equal("Total", json[1].GetProperty("countingCategory").GetString());
         Assert.Equal(3, json[1].GetProperty("currentLevel").GetInt32());
+        Assert.Equal(JsonValueKind.Null, json[0].GetProperty("area").ValueKind);
+        Assert.Equal(JsonValueKind.Null, json[0].GetProperty("district").ValueKind);
+        Assert.Equal(JsonValueKind.Null, json[0].GetProperty("subDistrict").ValueKind);
+        Assert.Equal(JsonValueKind.Null, json[0].GetProperty("areaEn").ValueKind);
+        Assert.Equal(JsonValueKind.Null, json[0].GetProperty("districtEn").ValueKind);
+        Assert.Equal(JsonValueKind.Null, json[0].GetProperty("subDistrictEn").ValueKind);
+        Assert.Equal(JsonValueKind.Null, json[0].GetProperty("name").ValueKind);
+        Assert.Equal(JsonValueKind.Null, json[0].GetProperty("nameEn").ValueKind);
+    }
+
+    [Fact]
+    public async Task Latest_IncludesCatalogFields_AndKeepsParksWithoutCatalog()
+    {
+        var (c, store, _) = Create();
+        store.Rows.Add(Point("CP1", "Total", 40, capacity: 82) with
+        {
+            Area = "香港島",
+            District = "中西區",
+            SubDistrict = "中環",
+            AreaEn = "Hong Kong Island",
+            DistrictEn = "Central and Western",
+            SubDistrictEn = "Central",
+            Name = "中區政府合署停車場",
+            NameEn = "Central Government Offices Car Park"
+        });
+        store.Rows.Add(Point("CP2", "Total", 3));
+        store.Rows.Add(Point("CP3", "Total", 9) with
+        {
+            Area = null,
+            District = null,
+            SubDistrict = null,
+            AreaEn = null,
+            DistrictEn = null,
+            SubDistrictEn = null,
+            Name = null,
+            NameEn = null
+        });
+        store.Rows.Add(Point("CP1", "EV", 7) with { Area = "should-not-appear", Name = "ev" });
+        store.Rows.Add(Point("CP4", "Total", 8, carparkNo: 2) with { Name = "level-row" });
+
+        var res = await c.GetAsync("/api/occupancy/latest");
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+        var json = await Body(res);
+        Assert.Equal(3, json.GetArrayLength());
+
+        Assert.Equal("CP1", json[0].GetProperty("carParkCode").GetString());
+        Assert.Equal(40, json[0].GetProperty("currentLevel").GetInt32());
+        Assert.Equal("香港島", json[0].GetProperty("area").GetString());
+        Assert.Equal("中西區", json[0].GetProperty("district").GetString());
+        Assert.Equal("中環", json[0].GetProperty("subDistrict").GetString());
+        Assert.Equal("Hong Kong Island", json[0].GetProperty("areaEn").GetString());
+        Assert.Equal("Central and Western", json[0].GetProperty("districtEn").GetString());
+        Assert.Equal("Central", json[0].GetProperty("subDistrictEn").GetString());
+        Assert.Equal("中區政府合署停車場", json[0].GetProperty("name").GetString());
+        Assert.Equal("Central Government Offices Car Park", json[0].GetProperty("nameEn").GetString());
+
+        Assert.Equal("CP2", json[1].GetProperty("carParkCode").GetString());
+        Assert.Equal(3, json[1].GetProperty("currentLevel").GetInt32());
+        Assert.Equal(JsonValueKind.Null, json[1].GetProperty("area").ValueKind);
+        Assert.Equal(JsonValueKind.Null, json[1].GetProperty("district").ValueKind);
+        Assert.Equal(JsonValueKind.Null, json[1].GetProperty("subDistrict").ValueKind);
+        Assert.Equal(JsonValueKind.Null, json[1].GetProperty("areaEn").ValueKind);
+        Assert.Equal(JsonValueKind.Null, json[1].GetProperty("districtEn").ValueKind);
+        Assert.Equal(JsonValueKind.Null, json[1].GetProperty("subDistrictEn").ValueKind);
+        Assert.Equal(JsonValueKind.Null, json[1].GetProperty("name").ValueKind);
+        Assert.Equal(JsonValueKind.Null, json[1].GetProperty("nameEn").ValueKind);
+
+        Assert.Equal("CP3", json[2].GetProperty("carParkCode").GetString());
+        Assert.Equal(9, json[2].GetProperty("currentLevel").GetInt32());
+        Assert.Equal(JsonValueKind.Null, json[2].GetProperty("area").ValueKind);
+        Assert.Equal(JsonValueKind.Null, json[2].GetProperty("name").ValueKind);
+        Assert.Equal(JsonValueKind.Null, json[2].GetProperty("nameEn").ValueKind);
     }
 
     [Fact]
@@ -271,7 +343,8 @@ public class ApiTests
         var res = await c.GetAsync("/api/occupancy/history?carParkCode=CP1&hoursBack=1");
         Assert.Equal(HttpStatusCode.OK, res.StatusCode);
         var json = await Body(res);
-        Assert.Equal(2, json.GetArrayLength());
+        // Point("CP1","Total",99,hoursAgo:0.2) defaults CarparkNo=0, so it is in the window (3 rows, not 2).
+        Assert.Equal(3, json.GetArrayLength());
 
         Assert.Equal("CP1", json[0].GetProperty("carParkCode").GetString());
         Assert.Equal(10, json[0].GetProperty("currentLevel").GetInt32());
@@ -284,6 +357,8 @@ public class ApiTests
         Assert.Equal(95, json[0].GetProperty("occupancyLimit").GetInt32());
         Assert.True(json[0].GetProperty("snapshotTime").GetDateTimeOffset() < json[1].GetProperty("snapshotTime").GetDateTimeOffset());
         Assert.Equal(40, json[1].GetProperty("currentLevel").GetInt32());
+        Assert.Equal(99, json[2].GetProperty("currentLevel").GetInt32());
+        Assert.True(json[1].GetProperty("snapshotTime").GetDateTimeOffset() <= json[2].GetProperty("snapshotTime").GetDateTimeOffset());
 
         var empty = await c.GetAsync("/api/occupancy/history?carParkCode=NONE&countingCategory=Total&hoursBack=1");
         Assert.Equal(HttpStatusCode.OK, empty.StatusCode);
