@@ -1,6 +1,7 @@
 ﻿-- Car-park master catalog for HK region and 18-district classification.
 -- Snapshot and history tables are intentionally unchanged.
 -- Area and District are nullable so unknown parks can be filled later.
+-- Name and NameEn are nullable; no park-name seed values are invented.
 
 IF OBJECT_ID(N'dbo.CarPark', N'U') IS NULL
 BEGIN
@@ -8,6 +9,8 @@ BEGIN
         CarParkCode NVARCHAR(50) NOT NULL CONSTRAINT PK_CarPark PRIMARY KEY,
         Area      NVARCHAR(10) NULL,
         District    NVARCHAR(20) NULL,
+        Name        NVARCHAR(200) NULL,
+        NameEn      NVARCHAR(200) NULL,
         CONSTRAINT CK_CarPark_Area CHECK (
             Area IS NULL OR Area IN (N'香港島', N'九龍', N'新界')
         ),
@@ -24,6 +27,9 @@ BEGIN
             OR (Area = N'香港島' AND District IN (N'中西區', N'灣仔區', N'東區', N'南區'))
             OR (Area = N'九龍' AND District IN (N'油尖旺區', N'深水埗區', N'九龍城區', N'黃大仙區', N'觀塘區'))
             OR (Area = N'新界' AND District IN (N'荃灣區', N'屯門區', N'元朗區', N'北區', N'大埔區', N'沙田區', N'西貢區', N'葵青區', N'離島區'))
+        ),
+        CONSTRAINT CK_CarPark_NameEn_RequiresName CHECK (
+            NameEn IS NULL OR Name IS NOT NULL
         )
     );
 END
