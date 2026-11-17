@@ -58,7 +58,7 @@ Occupancy routes require header `X-Api-Key` with the same value as `ApiKey`. A m
   ```
   Returns `200 {"inserted":N}` (batch inserted in one transaction) or `400 {"error":...}` on validation failure
   (empty array, missing field, blank/over-long strings). Any `CountingCategory` is accepted.
-- `GET /api/occupancy/latest` — one latest row per `CarParkCode` where `CountingCategory` is exactly `Total` and `CarparkNo` is `0` (newest `SnapshotTime`, then highest `Id`). Other categories and car park numbers are omitted. `200` JSON array, camelCase, same occupancy fields as ingest, plus nullable `dbo.CarPark` catalog fields via `LEFT JOIN` on `CarParkCode` (`area`, `district`, `subDistrict`, `areaEn`, `districtEn`, `subDistrictEn`, `name`, `nameEn`; null when no catalog row or the column is null); `[]` when no matching row exists.
+- `GET /api/occupancy/latest` — one latest row per `CarParkCode` where `CountingCategory` is exactly `Total` and `CarparkNo` is `0` (newest `SnapshotTime`, then highest `Id`). Other categories and car park numbers are omitted. Only parks with a matching open (`IsClosed = 0`) `dbo.CarPark` row are returned (`INNER JOIN` on `CarParkCode`). `200` JSON array, camelCase, same occupancy fields as ingest, plus nullable catalog fields (`area`, `district`, `subDistrict`, `areaEn`, `districtEn`, `subDistrictEn`, `name`, `nameEn`; null when the column is null); `[]` when no matching row exists.
   ```json
   [{"carParkCode":"CP1","snapshotTime":"2026-01-01T10:00:00+08:00","carparkNo":0,"carparkDesig":"A",
     "countingCategoryNo":1,"countingCategory":"Total","freeLimit":5,"occupancyLimit":95,"currentLevel":40,"capacity":100,

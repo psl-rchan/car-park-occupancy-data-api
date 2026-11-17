@@ -180,7 +180,7 @@ public record OccupancyRow
     public required int OccupancyLimit { get; init; }
     public required int CurrentLevel { get; init; }
     public required int Capacity { get; init; }
-    // Nullable dbo.CarPark catalog fields (LEFT JOIN on latest only).
+    // Nullable dbo.CarPark catalog fields (INNER JOIN on latest only; closed parks omitted).
     public string? Area { get; init; }
     public string? District { get; init; }
     public string? SubDistrict { get; init; }
@@ -533,8 +533,9 @@ public class SqlOccupancyStore(IConfiguration config) : IOccupancyStore
             FROM dbo.OccupancySnapshot
             WHERE CarparkNo = 0
         ) latest
-        LEFT JOIN dbo.CarPark cp ON cp.CarParkCode = latest.CarParkCode
+        INNER JOIN dbo.CarPark cp ON cp.CarParkCode = latest.CarParkCode
         WHERE rn = 1
+          AND cp.IsClosed = 0
         ORDER BY latest.CarParkCode, latest.CountingCategory
         """;
 
