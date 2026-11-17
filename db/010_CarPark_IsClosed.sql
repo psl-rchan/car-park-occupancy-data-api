@@ -1,4 +1,4 @@
--- 010_CarPark_IsClosed.sql
+﻿-- 010_CarPark_IsClosed.sql
 -- Add IsClosed (BIT, NOT NULL) to dbo.CarPark, default 0.
 -- Existing rows are filled with 0 by the default constraint, so every
 -- current park stays visible. No park is marked closed.

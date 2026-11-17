@@ -15,16 +15,9 @@ puts in the build. Export it in the shell and pass it at run time:
 
   export ConnectionStrings__CentralDb="Server=...;Database=...;User Id=...;Password=...;TrustServerCertificate=True"
 
-The database must already be reachable from the container. With DBA
-authorization, apply the numbered scripts in db/ in order (001 through
-010) before starting the API. Existing installations should apply only
-outstanding scripts. These create the snapshot table, indexes, and the
-dbo.CarPark catalog required by GET /api/occupancy/latest.
-
-db/010_CarPark_IsClosed.sql adds IsClosed BIT NOT NULL DEFAULT (0),
-keeping existing catalog rows open. It does not mark parks closed or
-alter snapshots. This API version requires IsClosed to filter latest
-occupancy to open catalog parks. Scripts are not applied automatically.
+The database must already be reachable from the container. Apply
+db/001_OccupancySnapshot.sql once so dbo.OccupancySnapshot exists, then
+db/002_OccupancySnapshot_Indexes.sql.
 
 API key
 -------
