@@ -10,12 +10,15 @@ public class ApiTests
     sealed class FakeStore : IOccupancyStore
     {
         public List<OccupancyRow> Rows = [];
+        // Mirrors INNER JOIN dbo.CarPark + cp.IsClosed = 0: code present and false → open catalog match.
+        public Dictionary<string, bool> CatalogIsClosed = new(StringComparer.Ordinal);
         public Task InsertAsync(IReadOnlyCollection<OccupancyRow> rows) { Rows.AddRange(rows); return Task.CompletedTask; }
 
         public Task<IReadOnlyList<OccupancyRow>> GetLatestAsync()
         {
             IReadOnlyList<OccupancyRow> latest = Rows
-                .Where(r => r.CarparkNo == 0)
+                .Where(r => r.CarparkNo == 0
+                    && CatalogIsClosed.TryGetValue(r.CarParkCode, out var closed) && !closed)
                 .Select((row, index) => (row, index))
                 .GroupBy(x => (x.row.CarParkCode, x.row.CountingCategory))
                 .Select(g => g.OrderByDescending(x => x.row.SnapshotTime).ThenByDescending(x => x.index).First().row)
@@ -231,6 +234,9 @@ public class ApiTests
     public async Task Latest_ReturnsNewestTotalRowPerCarPark()
     {
         var (c, store, _) = Create();
+        store.CatalogIsClosed["CP1"] = false;
+        store.CatalogIsClosed["CP2"] = false;
+        store.CatalogIsClosed["CP3"] = false;
         store.Rows.Add(Point("CP1", "Total", 10, hoursAgo: 3));
         store.Rows.Add(Point("CP1", "Total", 40, capacity: 82, hoursAgo: 1));
         store.Rows.Add(Point("CP1", "Total", 99, hoursAgo: 0.1, carparkNo: 1));
@@ -264,9 +270,12 @@ public class ApiTests
     }
 
     [Fact]
-    public async Task Latest_IncludesCatalogFields_AndKeepsParksWithoutCatalog()
+    public async Task Latest_IncludesOpenCatalogFields_AndOmitsUncataloguedOrClosed()
     {
         var (c, store, _) = Create();
+        store.CatalogIsClosed["CP1"] = false;
+        store.CatalogIsClosed["CP3"] = false;
+        store.CatalogIsClosed["CP5"] = true;
         store.Rows.Add(Point("CP1", "Total", 40, capacity: 82) with
         {
             Area = "香港島",
@@ -278,7 +287,7 @@ public class ApiTests
             Name = "中區政府合署停車場",
             NameEn = "Central Government Offices Car Park"
         });
-        store.Rows.Add(Point("CP2", "Total", 3));
+        store.Rows.Add(Point("CP2", "Total", 3)); // no catalog row → omitted
         store.Rows.Add(Point("CP3", "Total", 9) with
         {
             Area = null,
@@ -290,13 +299,14 @@ public class ApiTests
             Name = null,
             NameEn = null
         });
+        store.Rows.Add(Point("CP5", "Total", 12) with { Name = "closed-park" }); // IsClosed = 1 → omitted
         store.Rows.Add(Point("CP1", "EV", 7) with { Area = "should-not-appear", Name = "ev" });
         store.Rows.Add(Point("CP4", "Total", 8, carparkNo: 2) with { Name = "level-row" });
 
         var res = await c.GetAsync("/api/occupancy/latest");
         Assert.Equal(HttpStatusCode.OK, res.StatusCode);
         var json = await Body(res);
-        Assert.Equal(3, json.GetArrayLength());
+        Assert.Equal(2, json.GetArrayLength());
 
         Assert.Equal("CP1", json[0].GetProperty("carParkCode").GetString());
         Assert.Equal(40, json[0].GetProperty("currentLevel").GetInt32());
@@ -308,23 +318,13 @@ public class ApiTests
         Assert.Equal("Central", json[0].GetProperty("subDistrictEn").GetString());
         Assert.Equal("中區政府合署停車場", json[0].GetProperty("name").GetString());
         Assert.Equal("Central Government Offices Car Park", json[0].GetProperty("nameEn").GetString());
+        Assert.False(json[0].TryGetProperty("isClosed", out _));
 
-        Assert.Equal("CP2", json[1].GetProperty("carParkCode").GetString());
-        Assert.Equal(3, json[1].GetProperty("currentLevel").GetInt32());
+        Assert.Equal("CP3", json[1].GetProperty("carParkCode").GetString());
+        Assert.Equal(9, json[1].GetProperty("currentLevel").GetInt32());
         Assert.Equal(JsonValueKind.Null, json[1].GetProperty("area").ValueKind);
-        Assert.Equal(JsonValueKind.Null, json[1].GetProperty("district").ValueKind);
-        Assert.Equal(JsonValueKind.Null, json[1].GetProperty("subDistrict").ValueKind);
-        Assert.Equal(JsonValueKind.Null, json[1].GetProperty("areaEn").ValueKind);
-        Assert.Equal(JsonValueKind.Null, json[1].GetProperty("districtEn").ValueKind);
-        Assert.Equal(JsonValueKind.Null, json[1].GetProperty("subDistrictEn").ValueKind);
         Assert.Equal(JsonValueKind.Null, json[1].GetProperty("name").ValueKind);
         Assert.Equal(JsonValueKind.Null, json[1].GetProperty("nameEn").ValueKind);
-
-        Assert.Equal("CP3", json[2].GetProperty("carParkCode").GetString());
-        Assert.Equal(9, json[2].GetProperty("currentLevel").GetInt32());
-        Assert.Equal(JsonValueKind.Null, json[2].GetProperty("area").ValueKind);
-        Assert.Equal(JsonValueKind.Null, json[2].GetProperty("name").ValueKind);
-        Assert.Equal(JsonValueKind.Null, json[2].GetProperty("nameEn").ValueKind);
     }
 
     [Fact]
