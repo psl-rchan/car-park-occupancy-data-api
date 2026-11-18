@@ -166,7 +166,121 @@ app.MapGet("/api/occupancy/predict", async (
     });
 });
 
+// Coordinator calls at :05 Asia/Hong_Kong. OfficialHourHk is the current HK clock hour (not UTC).
+app.MapPost("/api/occupancy/official-hourly", async (
+    IOccupancyStore store,
+    IGeminiClient gemini,
+    CancellationToken cancellationToken) =>
+{
+    var officialHourHk = OfficialHour.CurrentHongKongHour();
+    var parks = (await store.GetLatestAsync())
+        .Where(r => r.CountingCategory == "Total" && r.CarparkNo == 0)
+        .ToArray();
+
+    var upserted = 0;
+    var skippedMissingOfficial = 0;
+    var forecastFailed = 0;
+    var rows = new List<OfficialHourlyRow>(parks.Length);
+
+    foreach (var park in parks)
+    {
+        var official = await ResolveOfficial00Async(store, park, officialHourHk);
+        if (official is null)
+        {
+            skippedMissingOfficial++;
+            continue;
+        }
+
+        var forecastLevel = await TryForecastPlusOneAsync(store, gemini, official, cancellationToken);
+        if (forecastLevel is null)
+            forecastFailed++;
+
+        rows.Add(new OfficialHourlyRow
+        {
+            OfficialHourHk = officialHourHk,
+            CarParkCode = official.CarParkCode,
+            SnapshotTime = official.SnapshotTime,
+            CurrentLevel = official.CurrentLevel,
+            Capacity = official.Capacity,
+            OccupancyPercent = OccupancyPct(official.CurrentLevel, official.Capacity),
+            ForecastLevel = forecastLevel,
+            ForecastPercent = forecastLevel is { } level ? OccupancyPct(level, official.Capacity) : null
+        });
+        upserted++;
+    }
+
+    if (rows.Count > 0)
+        await store.UpsertOfficialHourlyAsync(rows);
+
+    return Results.Ok(new { officialHourHk, upserted, skippedMissingOfficial, forecastFailed });
+});
+
 app.Run();
+
+static async Task<OccupancyRow?> ResolveOfficial00Async(
+    IOccupancyStore store, OccupancyRow latest, DateTimeOffset officialHourHk)
+{
+    if (OfficialHour.IsOfficial00(latest.SnapshotTime, officialHourHk))
+        return latest;
+
+    var history = await store.GetHistoryAsync(
+        latest.CarParkCode, "Total", 0, officialHourHk, officialHourHk.AddMinutes(1));
+    return history.LastOrDefault(r => OfficialHour.IsOfficial00(r.SnapshotTime, officialHourHk));
+}
+
+// Same OccupancyForecast path as GET /predict, but tip is the official :00 board only.
+static async Task<int?> TryForecastPlusOneAsync(
+    IOccupancyStore store, IGeminiClient gemini, OccupancyRow official, CancellationToken cancellationToken)
+{
+    var recent = await store.GetRecentAsync(official.CarParkCode, "Total");
+    var points = recent.Points.Where(p => p.SnapshotTime <= official.SnapshotTime).ToList();
+    if (points.Count == 0 || points[^1].SnapshotTime != official.SnapshotTime)
+    {
+        points.Add(new OccupancyPoint
+        {
+            SnapshotTime = official.SnapshotTime,
+            CountingCategory = "Total",
+            CurrentLevel = official.CurrentLevel,
+            Capacity = official.Capacity
+        });
+    }
+
+    try
+    {
+        var reply = await gemini.GenerateAsync(
+            OccupancyForecast.BuildPrompt(official.CarParkCode, "Total", points), cancellationToken);
+        if (!OccupancyForecast.TryParse(reply.Text, out var hours))
+            return null;
+        hours = OccupancyForecast.ApplyRecentSlope(points, hours);
+        hours = OccupancyForecast.ApplyResidualFloor(points, hours);
+        return hours.First(h => h.HourOffset == 1).CurrentLevel;
+    }
+    catch (GeminiException)
+    {
+        return null;
+    }
+}
+
+static decimal? OccupancyPct(int level, int capacity) =>
+    capacity > 0 ? (decimal?)Math.Round(100.0 * level / capacity, 1) : null;
+
+public static class OfficialHour
+{
+    static readonly TimeSpan HongKongOffset = TimeSpan.FromHours(8);
+
+    public static DateTimeOffset CurrentHongKongHour()
+    {
+        var hk = DateTimeOffset.UtcNow.ToOffset(HongKongOffset);
+        return new DateTimeOffset(hk.Year, hk.Month, hk.Day, hk.Hour, 0, 0, HongKongOffset);
+    }
+
+    public static bool IsOfficial00(DateTimeOffset snapshotTime, DateTimeOffset officialHourHk)
+    {
+        var hk = snapshotTime.ToOffset(HongKongOffset);
+        return hk.Minute == 0
+            && new DateTimeOffset(hk.Year, hk.Month, hk.Day, hk.Hour, 0, 0, HongKongOffset) == officialHourHk;
+    }
+}
 
 public record OccupancyRow
 {
@@ -191,6 +305,18 @@ public record OccupancyRow
     public string? NameEn { get; init; }
 }
 
+public record OfficialHourlyRow
+{
+    public required DateTimeOffset OfficialHourHk { get; init; }
+    public required string CarParkCode { get; init; }
+    public required DateTimeOffset SnapshotTime { get; init; }
+    public required int CurrentLevel { get; init; }
+    public required int Capacity { get; init; }
+    public decimal? OccupancyPercent { get; init; }
+    public int? ForecastLevel { get; init; }
+    public decimal? ForecastPercent { get; init; }
+}
+
 public sealed class OccupancyPoint
 {
     public DateTimeOffset SnapshotTime { get; set; }
@@ -208,6 +334,7 @@ public interface IOccupancyStore
     Task<IReadOnlyList<OccupancyRow>> GetHistoryAsync(
         string carParkCode, string countingCategory, int carparkNo, DateTimeOffset from, DateTimeOffset to);
     Task<RecentOccupancy> GetRecentAsync(string carParkCode, string? countingCategory);
+    Task UpsertOfficialHourlyAsync(IReadOnlyCollection<OfficialHourlyRow> rows);
 }
 
 public sealed record GeminiReply(string Model, string Text);
@@ -551,6 +678,25 @@ public class SqlOccupancyStore(IConfiguration config) : IOccupancyStore
         ORDER BY SnapshotTime ASC
         """;
 
+    private const string UpsertOfficialHourlySql = """
+        MERGE dbo.OfficialHourlyOccupancy AS t
+        USING (SELECT @OfficialHourHk AS OfficialHourHk, @CarParkCode AS CarParkCode) AS s
+          ON t.OfficialHourHk = s.OfficialHourHk AND t.CarParkCode = s.CarParkCode
+        WHEN MATCHED THEN UPDATE SET
+            SnapshotTime = @SnapshotTime,
+            CurrentLevel = @CurrentLevel,
+            Capacity = @Capacity,
+            OccupancyPercent = @OccupancyPercent,
+            ForecastLevel = @ForecastLevel,
+            ForecastPercent = @ForecastPercent
+        WHEN NOT MATCHED THEN INSERT
+            (OfficialHourHk, CarParkCode, SnapshotTime, CurrentLevel, Capacity,
+             OccupancyPercent, ForecastLevel, ForecastPercent)
+        VALUES
+            (@OfficialHourHk, @CarParkCode, @SnapshotTime, @CurrentLevel, @Capacity,
+             @OccupancyPercent, @ForecastLevel, @ForecastPercent);
+        """;
+
     public async Task InsertAsync(IReadOnlyCollection<OccupancyRow> rows)
     {
         await using var conn = new SqlConnection(config.GetConnectionString("CentralDb"));
@@ -642,6 +788,15 @@ public class SqlOccupancyStore(IConfiguration config) : IOccupancyStore
         if (points.Count == 0 || points[^1].SnapshotTime < recentSince)
             return new RecentOccupancy([], []);
         return new RecentOccupancy([category], points);
+    }
+
+    public async Task UpsertOfficialHourlyAsync(IReadOnlyCollection<OfficialHourlyRow> rows)
+    {
+        await using var conn = new SqlConnection(config.GetConnectionString("CentralDb"));
+        await conn.OpenAsync();
+        await using var tx = await conn.BeginTransactionAsync();
+        await conn.ExecuteAsync(UpsertOfficialHourlySql, rows, tx);
+        await tx.CommitAsync();
     }
 }
 
