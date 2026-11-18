@@ -10,6 +10,7 @@ public class ApiTests
     sealed class FakeStore : IOccupancyStore
     {
         public List<OccupancyRow> Rows = [];
+        public List<OfficialHourlyRow> OfficialHourly = [];
         // Mirrors INNER JOIN dbo.CarPark + cp.IsClosed = 0: code present and false → open catalog match.
         public Dictionary<string, bool> CatalogIsClosed = new(StringComparer.Ordinal);
         public Task InsertAsync(IReadOnlyCollection<OccupancyRow> rows) { Rows.AddRange(rows); return Task.CompletedTask; }
@@ -80,6 +81,18 @@ public class ApiTests
             if (points.Count == 0 || points[^1].SnapshotTime < recentSince)
                 return Task.FromResult(new RecentOccupancy([], []));
             return Task.FromResult(new RecentOccupancy([category], points));
+        }
+
+        public Task UpsertOfficialHourlyAsync(IReadOnlyCollection<OfficialHourlyRow> rows)
+        {
+            foreach (var row in rows)
+            {
+                var i = OfficialHourly.FindIndex(r =>
+                    r.OfficialHourHk == row.OfficialHourHk && r.CarParkCode == row.CarParkCode);
+                if (i >= 0) OfficialHourly[i] = row;
+                else OfficialHourly.Add(row);
+            }
+            return Task.CompletedTask;
         }
     }
 
@@ -188,6 +201,7 @@ public class ApiTests
         Assert.Equal(HttpStatusCode.Unauthorized, (await missing.GetAsync("/api/occupancy/latest")).StatusCode);
         Assert.Equal(HttpStatusCode.Unauthorized, (await missing.GetAsync("/api/occupancy/history?carParkCode=CP1&hoursBack=1")).StatusCode);
         Assert.Equal(HttpStatusCode.Unauthorized, (await missing.GetAsync("/api/occupancy/predict?carParkCode=CP1")).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await missing.PostAsync("/api/occupancy/official-hourly", content: null)).StatusCode);
         Assert.Null(gemini.LastPrompt);
 
         var (wrong, _, _) = Create(sendKey: false);
@@ -196,6 +210,7 @@ public class ApiTests
         Assert.Equal(HttpStatusCode.Unauthorized, (await wrong.GetAsync("/api/occupancy/history?carParkCode=CP1&hoursBack=1")).StatusCode);
         Assert.Equal(HttpStatusCode.Unauthorized, (await wrong.PostAsync("/api/occupancy", Json($"[{Row.Replace("{0}", "CP1")}]"))).StatusCode);
         Assert.Equal(HttpStatusCode.Unauthorized, (await wrong.GetAsync("/api/occupancy/predict?carParkCode=CP1")).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await wrong.PostAsync("/api/occupancy/official-hourly", content: null)).StatusCode);
         Assert.Equal(HttpStatusCode.OK, (await wrong.GetAsync("/health")).StatusCode);
 
         var (unset, _, _) = Create(sendKey: true, apiKey: " ");
@@ -789,6 +804,129 @@ public class ApiTests
             Environment.SetEnvironmentVariable("GEMINI_API_KEY", previousGemini);
             Environment.SetEnvironmentVariable("Vertex__ApiKey", previousAlias);
         }
+    }
+
+    [Fact]
+    public async Task OfficialHourly_FromLatest_UpsertsOfficial00AndPlusOneForecast()
+    {
+        var (c, store, _) = Create();
+        var hour = OfficialHour.CurrentHongKongHour();
+        store.CatalogIsClosed["CP1"] = false;
+        store.Rows.Add(Point("CP1", "Total", 40, capacity: 80) with { SnapshotTime = hour.AddSeconds(2) });
+
+        var res = await c.PostAsync("/api/occupancy/official-hourly", content: null);
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+        var json = await Body(res);
+        Assert.Equal(hour, json.GetProperty("officialHourHk").GetDateTimeOffset());
+        Assert.Equal(TimeSpan.FromHours(8), json.GetProperty("officialHourHk").GetDateTimeOffset().Offset);
+        Assert.Equal(0, json.GetProperty("officialHourHk").GetDateTimeOffset().Minute);
+        Assert.Equal(0, json.GetProperty("officialHourHk").GetDateTimeOffset().Second);
+        Assert.Equal(1, json.GetProperty("upserted").GetInt32());
+        Assert.Equal(0, json.GetProperty("skippedMissingOfficial").GetInt32());
+        Assert.Equal(0, json.GetProperty("forecastFailed").GetInt32());
+
+        var row = Assert.Single(store.OfficialHourly);
+        Assert.Equal(hour, row.OfficialHourHk);
+        Assert.Equal(TimeSpan.FromHours(8), row.OfficialHourHk.Offset);
+        Assert.Equal(0, row.OfficialHourHk.Minute);
+        Assert.Equal(hour.AddSeconds(2), row.SnapshotTime);
+        Assert.Equal(40, row.CurrentLevel);
+        Assert.Equal(80, row.Capacity);
+        Assert.Equal(50.0m, row.OccupancyPercent);
+        Assert.Equal(41, row.ForecastLevel);
+        Assert.Equal(51.2m, row.ForecastPercent);
+    }
+
+    [Fact]
+    public async Task OfficialHourly_WhenLatestMidHour_UsesHistoryOfficial00()
+    {
+        var (c, store, _) = Create();
+        var hour = OfficialHour.CurrentHongKongHour();
+        store.CatalogIsClosed["CP1"] = false;
+        store.Rows.Add(Point("CP1", "Total", 35, capacity: 100) with { SnapshotTime = hour.AddSeconds(1) });
+        store.Rows.Add(Point("CP1", "Total", 50, capacity: 100) with { SnapshotTime = hour.AddMinutes(15) });
+
+        var res = await c.PostAsync("/api/occupancy/official-hourly", content: null);
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+        var json = await Body(res);
+        Assert.Equal(1, json.GetProperty("upserted").GetInt32());
+        Assert.Equal(0, json.GetProperty("skippedMissingOfficial").GetInt32());
+
+        var row = Assert.Single(store.OfficialHourly);
+        Assert.Equal(hour.AddSeconds(1), row.SnapshotTime);
+        Assert.Equal(35, row.CurrentLevel);
+        Assert.Equal(41, row.ForecastLevel);
+    }
+
+    [Fact]
+    public async Task OfficialHourly_MissingOfficial00_SkipsPark_NoRow()
+    {
+        var (c, store, _) = Create();
+        var hour = OfficialHour.CurrentHongKongHour();
+        store.CatalogIsClosed["CP1"] = false;
+        store.Rows.Add(Point("CP1", "Total", 50, capacity: 100) with { SnapshotTime = hour.AddMinutes(15) });
+
+        var res = await c.PostAsync("/api/occupancy/official-hourly", content: null);
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+        var json = await Body(res);
+        Assert.Equal(0, json.GetProperty("upserted").GetInt32());
+        Assert.Equal(1, json.GetProperty("skippedMissingOfficial").GetInt32());
+        Assert.Equal(0, json.GetProperty("forecastFailed").GetInt32());
+        Assert.Empty(store.OfficialHourly);
+    }
+
+    [Fact]
+    public async Task OfficialHourly_PredictFailure_StillUpsertsLatestWithNullForecast()
+    {
+        var (c, store, gemini) = Create();
+        var hour = OfficialHour.CurrentHongKongHour();
+        store.CatalogIsClosed["CP1"] = false;
+        store.Rows.Add(Point("CP1", "Total", 40, capacity: 80) with { SnapshotTime = hour });
+        gemini.Error = new GeminiException((int)HttpStatusCode.BadGateway, "Gemini request failed.");
+
+        var res = await c.PostAsync("/api/occupancy/official-hourly", content: null);
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+        var json = await Body(res);
+        Assert.Equal(1, json.GetProperty("upserted").GetInt32());
+        Assert.Equal(1, json.GetProperty("forecastFailed").GetInt32());
+
+        var row = Assert.Single(store.OfficialHourly);
+        Assert.Equal(40, row.CurrentLevel);
+        Assert.Equal(50.0m, row.OccupancyPercent);
+        Assert.Null(row.ForecastLevel);
+        Assert.Null(row.ForecastPercent);
+    }
+
+    [Fact]
+    public async Task OfficialHourly_IdempotentUpsert_SameParkAndHour()
+    {
+        var (c, store, gemini) = Create();
+        var hour = OfficialHour.CurrentHongKongHour();
+        store.CatalogIsClosed["CP1"] = false;
+        store.Rows.Add(Point("CP1", "Total", 40, capacity: 100) with { SnapshotTime = hour });
+
+        Assert.Equal(HttpStatusCode.OK, (await c.PostAsync("/api/occupancy/official-hourly", content: null)).StatusCode);
+        Assert.Equal(41, Assert.Single(store.OfficialHourly).ForecastLevel);
+
+        gemini.Text = """
+            {"forecasts":[
+              {"hourOffset":1,"currentLevel":55},
+              {"hourOffset":2,"currentLevel":56},
+              {"hourOffset":3,"currentLevel":57},
+              {"hourOffset":4,"currentLevel":58},
+              {"hourOffset":5,"currentLevel":59},
+              {"hourOffset":6,"currentLevel":60}
+            ]}
+            """;
+        store.Rows[0] = Point("CP1", "Total", 42, capacity: 100) with { SnapshotTime = hour.AddSeconds(3) };
+
+        Assert.Equal(HttpStatusCode.OK, (await c.PostAsync("/api/occupancy/official-hourly", content: null)).StatusCode);
+        var row = Assert.Single(store.OfficialHourly);
+        Assert.Equal(hour, row.OfficialHourHk);
+        Assert.Equal("CP1", row.CarParkCode);
+        Assert.Equal(42, row.CurrentLevel);
+        Assert.Equal(55, row.ForecastLevel);
+        Assert.Equal(55.0m, row.ForecastPercent);
     }
 
     [Fact]

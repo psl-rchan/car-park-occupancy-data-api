@@ -7,7 +7,7 @@ Minimal ASP.NET Core (.NET 10) API that ingests car park occupancy snapshots int
 2. Set the connection string (never commit it):
    `export ConnectionStrings__CentralDb="Server=...;Database=...;User Id=...;Password=...;TrustServerCertificate=True"`
    (or `ConnectionStrings:CentralDb` in configuration/user-secrets)
-3. Set the occupancy API key (never commit it). `POST /api/occupancy`, `GET /api/occupancy/latest`, and `GET /api/occupancy/predict` require header `X-Api-Key`. `GET /health` does not.
+3. Set the occupancy API key (never commit it). `POST /api/occupancy`, `GET /api/occupancy/latest`, `GET /api/occupancy/predict`, and `POST /api/occupancy/official-hourly` require header `X-Api-Key`. `GET /health` does not.
    `export ApiKey="..."`
    Configuration key `ApiKey`. The environment variable `ApiKey` overrides it. If the value is missing or blank, those routes return `401 {"error":"Unauthorized."}`.
 4. For forecasts, set a Gemini API key (never commit it, never bake it into an image):
@@ -76,5 +76,10 @@ Occupancy routes require header `X-Api-Key` with the same value as `ApiKey`. A m
   - `400` bad input, or `countingCategory` is not `Total`.
   - `404` no Total `CarparkNo` `0` rows in the last 48 hours.
   - `502` Gemini HTTP/transport failure or an unreadable forecast. `503` when the Gemini API key is missing or `Vertex__Model` is not a plain model id.
+- `POST /api/occupancy/official-hourly` — no body. Intended for a coordinator call at `:05` Asia/Hong_Kong. Uses the current Hong Kong clock hour truncated to the hour as `OfficialHourHk` (`DATETIMEOFFSET(0)` with offset `+08:00`, on the hour). For every open catalog park on the live latest board (`IsClosed = 0`, `countingCategory` exactly `Total`, `carparkNo` `0`), resolves that hour's official `:00` latest (from latest when its Hong Kong minute is `0`, else from history for the same hour; seconds may be slightly past the hour). Skips a park when official `:00` is missing. Upserts `dbo.OfficialHourlyOccupancy` on `(OfficialHourHk, CarParkCode)` with `SnapshotTime`, `CurrentLevel`, `Capacity`, `OccupancyPercent`, and that official `:00` board's `+1` hour forecast (`ForecastLevel`, `ForecastPercent`) via the existing in-process predict path (tip forced to official `:00`, even if live latest has rolled mid-hour). Predict failure still upserts the official latest with null forecast fields. `200` summary:
+  ```json
+  {"officialHourHk":"2026-11-18T09:00:00+08:00","upserted":10,"skippedMissingOfficial":1,"forecastFailed":0}
+  ```
+  Table script: `db/011_OfficialHourlyOccupancy.sql` (already applied live; do not re-apply unless provisioning a new DB).
 
 `dotnet test` stubs history and Gemini and sends a test `X-Api-Key`. It does not call the live API and does not need `ApiKey` or `Gemini__ApiKey` in the environment. A live check is a request with `X-Api-Key` against a running API that has `ApiKey` and `Gemini__ApiKey` (or `GEMINI_API_KEY` / `Vertex__ApiKey`) set and rows already in `dbo.OccupancySnapshot`.
