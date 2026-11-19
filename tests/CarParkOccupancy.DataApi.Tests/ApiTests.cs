@@ -497,6 +497,8 @@ public class ApiTests
         Assert.Contains("Sunday 2026-11-08 20:00 level 140 cap 400", prompt);
         Assert.Contains("Monday 2026-11-09 02:00 level 45 cap 400", prompt);
         Assert.Contains("Use this curve for emptying: when the drop starts, how fast it falls, and how much occupancy remains after it bottoms out. Do not predict 0 at an hour offset where last week still had residual cars. Do not smooth away the evening drop.", prompt);
+        Assert.Contains("On weekday mornings about 08:00-10:00 HKT, if the recent 15-minute slope is up, hourOffset 1 must not revert toward a lower historical average or median. On weekday evenings about 17:00-19:00 HKT, if the recent slope is down, hourOffset 1 must not revert toward a higher historical average or median.", prompt);
+        Assert.Contains("Without a clear recent upward slope, and when the latest level is not already high or rising toward capacity, do not forecast near-full or 100% of capacity.", prompt);
         Assert.DoesNotContain("Hard rule:", prompt);
 
         Assert.Contains("Last week at this clock time and the next 6 hours (Asia/Hong_Kong):", prompt);
@@ -660,6 +662,95 @@ public class ApiTests
         var missRes = await c.GetAsync("/api/occupancy/predict?carParkCode=MISS");
         Assert.Equal(HttpStatusCode.OK, missRes.StatusCode);
         Assert.Equal(new[] { 11, 0, 0, 0, 0, 0 }, ForecastLevels(await Body(missRes)));
+    }
+
+    [Fact]
+    public void ApplyTransitionHold_WeekdayMorningEvening_HoldSlope_NightUnchanged()
+    {
+        var hk = TimeSpan.FromHours(8);
+        HourForecast[] RevertLow() =>
+        [
+            new(1, 150), new(2, 150), new(3, 150), new(4, 150), new(5, 150), new(6, 150)
+        ];
+        HourForecast[] RevertHigh() =>
+        [
+            new(1, 400), new(2, 400), new(3, 400), new(4, 400), new(5, 400), new(6, 400)
+        ];
+
+        OccupancyPoint[] Quarters(DateTimeOffset tip, params int[] levelsOldestFirst) =>
+            levelsOldestFirst.Select((level, i) => new OccupancyPoint
+            {
+                SnapshotTime = tip.AddMinutes(-15 * (levelsOldestFirst.Length - 1 - i)),
+                CountingCategory = "Total",
+                CurrentLevel = level,
+                Capacity = 500
+            }).ToArray();
+
+        // Mild up (~4%/h): not steep, so method-1 leave-alone; morning hold must still block revert-low.
+        var morning = Quarters(new DateTimeOffset(2026, 11, 16, 8, 0, 0, hk), 200, 205, 210, 215);
+        var morningHeld = OccupancyForecast.ApplyTransitionHold(morning, RevertLow());
+        Assert.Equal(235, morningHeld[0].CurrentLevel);
+        Assert.Equal(150, morningHeld[1].CurrentLevel);
+
+        // Mild down (~4%/h) at 18:00: evening hold must block revert-high.
+        var evening = Quarters(new DateTimeOffset(2026, 11, 16, 18, 0, 0, hk), 300, 295, 290, 285);
+        var eveningHeld = OccupancyForecast.ApplyTransitionHold(evening, RevertHigh());
+        Assert.Equal(265, eveningHeld[0].CurrentLevel);
+        Assert.Equal(400, eveningHeld[1].CurrentLevel);
+
+        // Night: same mild up + revert-low stays untouched.
+        var night = Quarters(new DateTimeOffset(2026, 11, 16, 2, 0, 0, hk), 200, 205, 210, 215);
+        var nightHeld = OccupancyForecast.ApplyTransitionHold(night, RevertLow());
+        Assert.Equal(new[] { 150, 150, 150, 150, 150, 150 }, nightHeld.Select(h => h.CurrentLevel).ToArray());
+    }
+
+    [Fact]
+    public void ApplyNoUnjustifiedFull_StableLow_NotNearCapacity()
+    {
+        var tip = new DateTimeOffset(2026, 11, 19, 5, 0, 0, TimeSpan.FromHours(8));
+        var points = new[] { 4, 4, 4, 4 }.Select((level, i) => new OccupancyPoint
+        {
+            SnapshotTime = tip.AddMinutes(-15 * (3 - i)),
+            CountingCategory = "Total",
+            CurrentLevel = level,
+            Capacity = 22
+        }).ToArray();
+        HourForecast[] full =
+        [
+            new(1, 22), new(2, 22), new(3, 22), new(4, 22), new(5, 22), new(6, 22)
+        ];
+
+        var clamped = OccupancyForecast.ApplyNoUnjustifiedFull(points, full);
+        Assert.Equal(new[] { 4, 4, 4, 4, 4, 4 }, clamped.Select(h => h.CurrentLevel).ToArray());
+    }
+
+    [Fact]
+    public async Task Predict_StableLow_DoesNotForecastFull()
+    {
+        var (c, store, gemini) = Create();
+        var now = DateTimeOffset.UtcNow;
+        for (var i = 0; i < 4; i++)
+        {
+            store.Rows.Add(Point("P926", "Total", 4, capacity: 22) with
+            {
+                SnapshotTime = now.AddMinutes(-15 * (3 - i))
+            });
+        }
+
+        gemini.Text = """
+            {"forecasts":[
+              {"hourOffset":1,"currentLevel":22},
+              {"hourOffset":2,"currentLevel":22},
+              {"hourOffset":3,"currentLevel":22},
+              {"hourOffset":4,"currentLevel":22},
+              {"hourOffset":5,"currentLevel":22},
+              {"hourOffset":6,"currentLevel":22}
+            ]}
+            """;
+        var res = await c.GetAsync("/api/occupancy/predict?carParkCode=P926");
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+        Assert.Equal(new[] { 4, 4, 4, 4, 4, 4 }, ForecastLevels(await Body(res)));
+        Assert.Contains("do not forecast near-full or 100% of capacity", gemini.LastPrompt);
     }
 
     [Fact]
