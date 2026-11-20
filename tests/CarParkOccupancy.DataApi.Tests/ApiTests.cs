@@ -94,6 +94,18 @@ public class ApiTests
             }
             return Task.CompletedTask;
         }
+
+        public Task<IReadOnlyList<OfficialHourlyRow>> GetOfficialHourlyAsync(
+            string carParkCode, DateTimeOffset from, DateTimeOffset to)
+        {
+            IReadOnlyList<OfficialHourlyRow> rows = OfficialHourly
+                .Where(r => r.CarParkCode == carParkCode
+                    && r.OfficialHourHk >= from
+                    && r.OfficialHourHk <= to)
+                .OrderBy(r => r.OfficialHourHk)
+                .ToList();
+            return Task.FromResult(rows);
+        }
     }
 
     sealed class FakeGemini : IGeminiClient
@@ -202,6 +214,7 @@ public class ApiTests
         Assert.Equal(HttpStatusCode.Unauthorized, (await missing.GetAsync("/api/occupancy/history?carParkCode=CP1&hoursBack=1")).StatusCode);
         Assert.Equal(HttpStatusCode.Unauthorized, (await missing.GetAsync("/api/occupancy/predict?carParkCode=CP1")).StatusCode);
         Assert.Equal(HttpStatusCode.Unauthorized, (await missing.PostAsync("/api/occupancy/official-hourly", content: null)).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await missing.GetAsync("/api/occupancy/official-hourly?carParkCode=CP1&from=2026-01-01T00:00:00%2B08:00&to=2026-01-01T01:00:00%2B08:00")).StatusCode);
         Assert.Null(gemini.LastPrompt);
 
         var (wrong, _, _) = Create(sendKey: false);
@@ -211,6 +224,7 @@ public class ApiTests
         Assert.Equal(HttpStatusCode.Unauthorized, (await wrong.PostAsync("/api/occupancy", Json($"[{Row.Replace("{0}", "CP1")}]"))).StatusCode);
         Assert.Equal(HttpStatusCode.Unauthorized, (await wrong.GetAsync("/api/occupancy/predict?carParkCode=CP1")).StatusCode);
         Assert.Equal(HttpStatusCode.Unauthorized, (await wrong.PostAsync("/api/occupancy/official-hourly", content: null)).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await wrong.GetAsync("/api/occupancy/official-hourly?carParkCode=CP1&from=2026-01-01T00:00:00%2B08:00&to=2026-01-01T01:00:00%2B08:00")).StatusCode);
         Assert.Equal(HttpStatusCode.OK, (await wrong.GetAsync("/health")).StatusCode);
 
         var (unset, _, _) = Create(sendKey: true, apiKey: " ");
@@ -895,6 +909,125 @@ public class ApiTests
             Environment.SetEnvironmentVariable("GEMINI_API_KEY", previousGemini);
             Environment.SetEnvironmentVariable("Vertex__ApiKey", previousAlias);
         }
+    }
+
+    static OfficialHourlyRow Official(
+        DateTimeOffset hour, string code, int level, int capacity,
+        int? forecastLevel = null, decimal? occupancyPercent = null, decimal? forecastPercent = null) => new()
+    {
+        OfficialHourHk = hour,
+        CarParkCode = code,
+        SnapshotTime = hour.AddSeconds(2),
+        CurrentLevel = level,
+        Capacity = capacity,
+        OccupancyPercent = occupancyPercent ?? (capacity > 0 ? (decimal?)Math.Round(100.0 * level / capacity, 1) : null),
+        ForecastLevel = forecastLevel,
+        ForecastPercent = forecastPercent ?? (forecastLevel is { } fl && capacity > 0
+            ? (decimal?)Math.Round(100.0 * fl / capacity, 1) : null)
+    };
+
+    [Fact]
+    public async Task OfficialHourlyGet_ChartAlignsForecastFromPriorHour()
+    {
+        var (c, store, _) = Create();
+        var hk = TimeSpan.FromHours(8);
+        var h16 = new DateTimeOffset(2026, 3, 1, 16, 0, 0, hk);
+        var h17 = new DateTimeOffset(2026, 3, 1, 17, 0, 0, hk);
+        store.OfficialHourly.Add(Official(h16, "CP1", 40, 80, forecastLevel: 45));
+        store.OfficialHourly.Add(Official(h17, "CP1", 50, 80, forecastLevel: 55));
+
+        var res = await c.GetAsync(
+            "/api/occupancy/official-hourly?carParkCode=CP1&from=2026-03-01T16:00:00%2B08:00&to=2026-03-01T17:00:00%2B08:00");
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+        var json = await Body(res);
+        Assert.Equal(2, json.GetArrayLength());
+
+        Assert.Equal("CP1", json[0].GetProperty("carParkCode").GetString());
+        Assert.Equal(h16, json[0].GetProperty("officialHourHk").GetDateTimeOffset());
+        Assert.Equal(hk, json[0].GetProperty("officialHourHk").GetDateTimeOffset().Offset);
+        Assert.Equal(40, json[0].GetProperty("currentLevel").GetInt32());
+        Assert.Equal(50.0, json[0].GetProperty("occupancyPercent").GetDouble(), 1);
+        Assert.Equal(JsonValueKind.Null, json[0].GetProperty("forecastLevel").ValueKind);
+        Assert.Equal(JsonValueKind.Null, json[0].GetProperty("forecastPercent").ValueKind);
+
+        Assert.Equal(h17, json[1].GetProperty("officialHourHk").GetDateTimeOffset());
+        Assert.Equal(hk, json[1].GetProperty("officialHourHk").GetDateTimeOffset().Offset);
+        Assert.Equal(50, json[1].GetProperty("currentLevel").GetInt32());
+        Assert.Equal(45, json[1].GetProperty("forecastLevel").GetInt32());
+        Assert.Equal(56.2, json[1].GetProperty("forecastPercent").GetDouble(), 1);
+    }
+
+    [Fact]
+    public async Task OfficialHourlyGet_LookbackHourNotEmitted_UnlessInsideWindow()
+    {
+        var (c, store, _) = Create();
+        var hk = TimeSpan.FromHours(8);
+        var h16 = new DateTimeOffset(2026, 3, 1, 16, 0, 0, hk);
+        var h17 = new DateTimeOffset(2026, 3, 1, 17, 0, 0, hk);
+        store.OfficialHourly.Add(Official(h16, "CP1", 40, 80, forecastLevel: 45));
+        store.OfficialHourly.Add(Official(h17, "CP1", 50, 80, forecastLevel: 55));
+
+        var res = await c.GetAsync(
+            "/api/occupancy/official-hourly?carParkCode=CP1&from=2026-03-01T17:00:00%2B08:00&to=2026-03-01T17:00:00%2B08:00");
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+        var json = await Body(res);
+        var item = Assert.Single(json.EnumerateArray());
+        Assert.Equal(h17, item.GetProperty("officialHourHk").GetDateTimeOffset());
+        Assert.Equal(50, item.GetProperty("currentLevel").GetInt32());
+        Assert.Equal(45, item.GetProperty("forecastLevel").GetInt32());
+    }
+
+    [Fact]
+    public async Task OfficialHourlyGet_MissingRowStillIncluded_WhenPriorHasForecast()
+    {
+        var (c, store, _) = Create();
+        var hk = TimeSpan.FromHours(8);
+        var h16 = new DateTimeOffset(2026, 3, 1, 16, 0, 0, hk);
+        var h17 = new DateTimeOffset(2026, 3, 1, 17, 0, 0, hk);
+        store.OfficialHourly.Add(Official(h16, "CP1", 40, 80, forecastLevel: 45));
+
+        var res = await c.GetAsync(
+            "/api/occupancy/official-hourly?carParkCode=CP1&from=2026-03-01T16:00:00%2B08:00&to=2026-03-01T17:00:00%2B08:00");
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+        var json = await Body(res);
+        Assert.Equal(2, json.GetArrayLength());
+
+        Assert.Equal(h16, json[0].GetProperty("officialHourHk").GetDateTimeOffset());
+        Assert.Equal(40, json[0].GetProperty("currentLevel").GetInt32());
+        Assert.Equal(JsonValueKind.Null, json[0].GetProperty("forecastLevel").ValueKind);
+
+        Assert.Equal(h17, json[1].GetProperty("officialHourHk").GetDateTimeOffset());
+        Assert.Equal(hk, json[1].GetProperty("officialHourHk").GetDateTimeOffset().Offset);
+        Assert.Equal(JsonValueKind.Null, json[1].GetProperty("snapshotTime").ValueKind);
+        Assert.Equal(JsonValueKind.Null, json[1].GetProperty("currentLevel").ValueKind);
+        Assert.Equal(JsonValueKind.Null, json[1].GetProperty("capacity").ValueKind);
+        Assert.Equal(JsonValueKind.Null, json[1].GetProperty("occupancyPercent").ValueKind);
+        Assert.Equal(45, json[1].GetProperty("forecastLevel").GetInt32());
+        Assert.Equal(56.2, json[1].GetProperty("forecastPercent").GetDouble(), 1);
+    }
+
+    [Fact]
+    public async Task OfficialHourlyGet_Empty_Returns200EmptyArray_Not404()
+    {
+        var (c, _, _) = Create();
+        var res = await c.GetAsync(
+            "/api/occupancy/official-hourly?carParkCode=NONE&from=2026-03-01T16:00:00%2B08:00&to=2026-03-01T17:00:00%2B08:00");
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+        Assert.Equal(0, (await Body(res)).GetArrayLength());
+    }
+
+    [Theory]
+    [InlineData("?from=2026-03-01T16:00:00%2B08:00&to=2026-03-01T17:00:00%2B08:00")]
+    [InlineData("?carParkCode=%20&from=2026-03-01T16:00:00%2B08:00&to=2026-03-01T17:00:00%2B08:00")]
+    [InlineData("?carParkCode=this-code-is-longer-than-fifty-characters-so-it-fails&from=2026-03-01T16:00:00%2B08:00&to=2026-03-01T17:00:00%2B08:00")]
+    [InlineData("?carParkCode=CP1")]
+    [InlineData("?carParkCode=CP1&from=2026-03-01T16:00:00%2B08:00")]
+    [InlineData("?carParkCode=CP1&to=2026-03-01T17:00:00%2B08:00")]
+    [InlineData("?carParkCode=CP1&from=2026-03-01T18:00:00%2B08:00&to=2026-03-01T17:00:00%2B08:00")]
+    public async Task OfficialHourlyGet_BadInput_BadRequest(string query)
+    {
+        var (c, _, _) = Create();
+        Assert.Equal(HttpStatusCode.BadRequest, (await c.GetAsync("/api/occupancy/official-hourly" + query)).StatusCode);
     }
 
     [Fact]

@@ -168,6 +168,54 @@ app.MapGet("/api/occupancy/predict", async (
     });
 });
 
+// Chart-aligned read: actual from row H, Forecast* from row H-1 (made at H for H+1).
+app.MapGet("/api/occupancy/official-hourly", async (
+    string? carParkCode,
+    DateTimeOffset? from,
+    DateTimeOffset? to,
+    IOccupancyStore store) =>
+{
+    if (string.IsNullOrWhiteSpace(carParkCode) || carParkCode.Length > 50)
+        return Results.BadRequest(new { error = "carParkCode is required (max 50 chars)." });
+    if (from is not { } fromValue || to is not { } toValue)
+        return Results.BadRequest(new { error = "from and to are required." });
+    if (fromValue > toValue)
+        return Results.BadRequest(new { error = "from must be before or equal to to." });
+
+    // One hour before from so the first in-window hour can take Forecast* from H-1.
+    var rows = await store.GetOfficialHourlyAsync(carParkCode, fromValue.AddHours(-1), toValue);
+    var byHour = rows.ToDictionary(r => r.OfficialHourHk);
+    var hours = new SortedSet<DateTimeOffset>();
+    foreach (var r in rows)
+    {
+        if (r.OfficialHourHk >= fromValue && r.OfficialHourHk <= toValue)
+            hours.Add(r.OfficialHourHk);
+        if (r.ForecastLevel is not null)
+        {
+            var next = r.OfficialHourHk.AddHours(1);
+            if (next >= fromValue && next <= toValue)
+                hours.Add(next);
+        }
+    }
+
+    return Results.Ok(hours.Select(h =>
+    {
+        byHour.TryGetValue(h, out var actual);
+        byHour.TryGetValue(h.AddHours(-1), out var prev);
+        return new
+        {
+            carParkCode,
+            officialHourHk = actual?.OfficialHourHk ?? prev!.OfficialHourHk.AddHours(1),
+            snapshotTime = actual?.SnapshotTime,
+            currentLevel = actual?.CurrentLevel,
+            capacity = actual?.Capacity,
+            occupancyPercent = actual?.OccupancyPercent,
+            forecastLevel = prev?.ForecastLevel,
+            forecastPercent = prev?.ForecastPercent
+        };
+    }).ToArray());
+});
+
 // Coordinator calls at :05 Asia/Hong_Kong. OfficialHourHk is the current HK clock hour (not UTC).
 app.MapPost("/api/occupancy/official-hourly", async (
     IOccupancyStore store,
@@ -339,6 +387,8 @@ public interface IOccupancyStore
         string carParkCode, string countingCategory, int carparkNo, DateTimeOffset from, DateTimeOffset to);
     Task<RecentOccupancy> GetRecentAsync(string carParkCode, string? countingCategory);
     Task UpsertOfficialHourlyAsync(IReadOnlyCollection<OfficialHourlyRow> rows);
+    Task<IReadOnlyList<OfficialHourlyRow>> GetOfficialHourlyAsync(
+        string carParkCode, DateTimeOffset from, DateTimeOffset to);
 }
 
 public sealed record GeminiReply(string Model, string Text);
@@ -757,6 +807,16 @@ public class SqlOccupancyStore(IConfiguration config) : IOccupancyStore
              @OccupancyPercent, @ForecastLevel, @ForecastPercent);
         """;
 
+    private const string OfficialHourlySql = """
+        SELECT OfficialHourHk, CarParkCode, SnapshotTime, CurrentLevel, Capacity,
+               OccupancyPercent, ForecastLevel, ForecastPercent
+        FROM dbo.OfficialHourlyOccupancy
+        WHERE CarParkCode = @CarParkCode
+          AND OfficialHourHk >= @FromTime
+          AND OfficialHourHk <= @ToTime
+        ORDER BY OfficialHourHk ASC
+        """;
+
     public async Task InsertAsync(IReadOnlyCollection<OccupancyRow> rows)
     {
         await using var conn = new SqlConnection(config.GetConnectionString("CentralDb"));
@@ -857,6 +917,19 @@ public class SqlOccupancyStore(IConfiguration config) : IOccupancyStore
         await using var tx = await conn.BeginTransactionAsync();
         await conn.ExecuteAsync(UpsertOfficialHourlySql, rows, tx);
         await tx.CommitAsync();
+    }
+
+    public async Task<IReadOnlyList<OfficialHourlyRow>> GetOfficialHourlyAsync(
+        string carParkCode, DateTimeOffset from, DateTimeOffset to)
+    {
+        await using var conn = new SqlConnection(config.GetConnectionString("CentralDb"));
+        await conn.OpenAsync();
+        return (await conn.QueryAsync<OfficialHourlyRow>(OfficialHourlySql, new
+        {
+            CarParkCode = carParkCode,
+            FromTime = from,
+            ToTime = to
+        })).AsList();
     }
 }
 
