@@ -89,7 +89,16 @@ public class ApiTests
             {
                 var i = OfficialHourly.FindIndex(r =>
                     r.OfficialHourHk == row.OfficialHourHk && r.CarParkCode == row.CarParkCode);
-                if (i >= 0) OfficialHourly[i] = row;
+                // Mirrors MERGE COALESCE(@Forecast*, t.Forecast*): null must not wipe a prior forecast.
+                if (i >= 0)
+                {
+                    var prev = OfficialHourly[i];
+                    OfficialHourly[i] = row with
+                    {
+                        ForecastLevel = row.ForecastLevel ?? prev.ForecastLevel,
+                        ForecastPercent = row.ForecastPercent ?? prev.ForecastPercent
+                    };
+                }
                 else OfficialHourly.Add(row);
             }
             return Task.CompletedTask;
@@ -112,11 +121,25 @@ public class ApiTests
     {
         public string Text = SixHours;
         public Exception? Error;
+        // When set, fail this many calls then succeed with Text (ignores permanent Error after).
+        public int? TransientFailures;
+        public int CallCount;
         public string? LastPrompt;
 
         public Task<GeminiReply> GenerateAsync(string prompt, CancellationToken cancellationToken)
         {
+            CallCount++;
             LastPrompt = prompt;
+            if (TransientFailures is int left)
+            {
+                if (left > 0)
+                {
+                    TransientFailures = left - 1;
+                    return Task.FromException<GeminiReply>(
+                        Error ?? new GeminiException((int)HttpStatusCode.BadGateway, "transient"));
+                }
+                return Task.FromResult(new GeminiReply("fake-model", Text));
+            }
             return Error is null
                 ? Task.FromResult(new GeminiReply("fake-model", Text))
                 : Task.FromException<GeminiReply>(Error);
@@ -1151,6 +1174,84 @@ public class ApiTests
         Assert.Equal(42, row.CurrentLevel);
         Assert.Equal(55, row.ForecastLevel);
         Assert.Equal(55.0m, row.ForecastPercent);
+    }
+
+    [Fact]
+    public async Task OfficialHourly_PredictTransientFailure_RetriesAndFillsForecast()
+    {
+        var (c, store, gemini) = Create();
+        var hour = OfficialHour.CurrentHongKongHour();
+        store.CatalogIsClosed["CP1"] = false;
+        store.Rows.Add(Point("CP1", "Total", 40, capacity: 80) with { SnapshotTime = hour });
+        gemini.TransientFailures = 2;
+
+        var res = await c.PostAsync("/api/occupancy/official-hourly", content: null);
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+        var json = await Body(res);
+        Assert.Equal(1, json.GetProperty("upserted").GetInt32());
+        Assert.Equal(0, json.GetProperty("forecastFailed").GetInt32());
+        Assert.Equal(3, gemini.CallCount);
+
+        var row = Assert.Single(store.OfficialHourly);
+        Assert.Equal(41, row.ForecastLevel);
+        Assert.Equal(51.2m, row.ForecastPercent);
+    }
+
+    [Fact]
+    public async Task OfficialHourly_LaterUpsert_FillsNullForecastFromPriorAttempt()
+    {
+        var (c, store, gemini) = Create();
+        var hour = OfficialHour.CurrentHongKongHour();
+        store.CatalogIsClosed["CP1"] = false;
+        store.Rows.Add(Point("CP1", "Total", 40, capacity: 80) with { SnapshotTime = hour });
+        gemini.Error = new GeminiException((int)HttpStatusCode.BadGateway, "Gemini request failed.");
+
+        Assert.Equal(HttpStatusCode.OK, (await c.PostAsync("/api/occupancy/official-hourly", content: null)).StatusCode);
+        Assert.Null(Assert.Single(store.OfficialHourly).ForecastLevel);
+
+        gemini.Error = null;
+        gemini.TransientFailures = null;
+        Assert.Equal(HttpStatusCode.OK, (await c.PostAsync("/api/occupancy/official-hourly", content: null)).StatusCode);
+        var row = Assert.Single(store.OfficialHourly);
+        Assert.Equal(41, row.ForecastLevel);
+        Assert.Equal(51.2m, row.ForecastPercent);
+    }
+
+    [Fact]
+    public async Task OfficialHourly_LaterUpsert_PreservesForecastWhenRetryPredictFails()
+    {
+        var (c, store, gemini) = Create();
+        var hour = OfficialHour.CurrentHongKongHour();
+        store.CatalogIsClosed["CP1"] = false;
+        store.Rows.Add(Point("CP1", "Total", 40, capacity: 100) with { SnapshotTime = hour });
+
+        Assert.Equal(HttpStatusCode.OK, (await c.PostAsync("/api/occupancy/official-hourly", content: null)).StatusCode);
+        Assert.Equal(41, Assert.Single(store.OfficialHourly).ForecastLevel);
+
+        gemini.Error = new GeminiException((int)HttpStatusCode.BadGateway, "Gemini request failed.");
+        Assert.Equal(HttpStatusCode.OK, (await c.PostAsync("/api/occupancy/official-hourly", content: null)).StatusCode);
+        var row = Assert.Single(store.OfficialHourly);
+        Assert.Equal(41, row.ForecastLevel);
+        Assert.Equal(41.0m, row.ForecastPercent);
+    }
+
+    [Fact]
+    public async Task OfficialHourly_ClosedPark_NotCountedInSkippedMissingOfficial()
+    {
+        var (c, store, _) = Create();
+        var hour = OfficialHour.CurrentHongKongHour();
+        store.CatalogIsClosed["CP1"] = false;
+        store.CatalogIsClosed["CP_CLOSED"] = true;
+        // Open park missing official :00 → skipped. Closed park is omitted from latest (IsClosed), not a miss.
+        store.Rows.Add(Point("CP1", "Total", 50, capacity: 100) with { SnapshotTime = hour.AddMinutes(15) });
+        store.Rows.Add(Point("CP_CLOSED", "Total", 10, capacity: 100) with { SnapshotTime = hour.AddMinutes(15) });
+
+        var res = await c.PostAsync("/api/occupancy/official-hourly", content: null);
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+        var json = await Body(res);
+        Assert.Equal(0, json.GetProperty("upserted").GetInt32());
+        Assert.Equal(1, json.GetProperty("skippedMissingOfficial").GetInt32());
+        Assert.Empty(store.OfficialHourly);
     }
 
     [Fact]
