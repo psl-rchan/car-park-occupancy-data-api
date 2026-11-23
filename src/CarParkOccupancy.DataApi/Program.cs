@@ -279,6 +279,7 @@ static async Task<OccupancyRow?> ResolveOfficial00Async(
 }
 
 // Same OccupancyForecast path as GET /predict, but tip is the official :00 board only.
+// Up to two immediate retries so one POST can still fill Forecast* after a transient Gemini miss.
 static async Task<int?> TryForecastPlusOneAsync(
     IOccupancyStore store, IGeminiClient gemini, OccupancyRow official, CancellationToken cancellationToken)
 {
@@ -295,22 +296,28 @@ static async Task<int?> TryForecastPlusOneAsync(
         });
     }
 
-    try
+    for (var attempt = 0; attempt < 3; attempt++)
     {
-        var reply = await gemini.GenerateAsync(
-            OccupancyForecast.BuildPrompt(official.CarParkCode, "Total", points), cancellationToken);
-        if (!OccupancyForecast.TryParse(reply.Text, out var hours))
-            return null;
-        hours = OccupancyForecast.ApplyRecentSlope(points, hours);
-        hours = OccupancyForecast.ApplyTransitionHold(points, hours);
-        hours = OccupancyForecast.ApplyResidualFloor(points, hours);
-        hours = OccupancyForecast.ApplyNoUnjustifiedFull(points, hours);
-        return hours.First(h => h.HourOffset == 1).CurrentLevel;
+        cancellationToken.ThrowIfCancellationRequested();
+        try
+        {
+            var reply = await gemini.GenerateAsync(
+                OccupancyForecast.BuildPrompt(official.CarParkCode, "Total", points), cancellationToken);
+            if (!OccupancyForecast.TryParse(reply.Text, out var hours))
+                continue;
+            hours = OccupancyForecast.ApplyRecentSlope(points, hours);
+            hours = OccupancyForecast.ApplyTransitionHold(points, hours);
+            hours = OccupancyForecast.ApplyResidualFloor(points, hours);
+            hours = OccupancyForecast.ApplyNoUnjustifiedFull(points, hours);
+            return hours.First(h => h.HourOffset == 1).CurrentLevel;
+        }
+        catch (GeminiException)
+        {
+            // try again until attempts are exhausted
+        }
     }
-    catch (GeminiException)
-    {
-        return null;
-    }
+
+    return null;
 }
 
 static decimal? OccupancyPct(int level, int capacity) =>
@@ -788,6 +795,7 @@ public class SqlOccupancyStore(IConfiguration config) : IOccupancyStore
         ORDER BY SnapshotTime ASC
         """;
 
+    // COALESCE keeps a prior Forecast* when a later same-hour attempt gets null (retry must not wipe a win).
     private const string UpsertOfficialHourlySql = """
         MERGE dbo.OfficialHourlyOccupancy AS t
         USING (SELECT @OfficialHourHk AS OfficialHourHk, @CarParkCode AS CarParkCode) AS s
@@ -797,8 +805,8 @@ public class SqlOccupancyStore(IConfiguration config) : IOccupancyStore
             CurrentLevel = @CurrentLevel,
             Capacity = @Capacity,
             OccupancyPercent = @OccupancyPercent,
-            ForecastLevel = @ForecastLevel,
-            ForecastPercent = @ForecastPercent
+            ForecastLevel = COALESCE(@ForecastLevel, t.ForecastLevel),
+            ForecastPercent = COALESCE(@ForecastPercent, t.ForecastPercent)
         WHEN NOT MATCHED THEN INSERT
             (OfficialHourHk, CarParkCode, SnapshotTime, CurrentLevel, Capacity,
              OccupancyPercent, ForecastLevel, ForecastPercent)
